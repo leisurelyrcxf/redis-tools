@@ -70,6 +70,7 @@ func (r *Row) AccuSet(p redis.Pipeliner) {
     case RedisTypeString:
         p.SetNX(r.K, r.V, 0)
     case RedisTypeHash:
+        // TODO May change to string, does type matter?
         for k, v := range r.V.(map[string]string) {
             p.HSetNX(r.K, k, v)
         }
@@ -104,7 +105,7 @@ func (rs Rows) GetTypes(client *redis.Client) error {
     return nil
 }
 
-func (rs Rows) GetValues(client *redis.Client) error {
+func (rs Rows) MGet(client *redis.Client) error {
     p := client.Pipeline()
     for _, row := range rs {
         row.AccuGet(p)
@@ -123,7 +124,7 @@ func (rs Rows) GetValues(client *redis.Client) error {
     return nil
 }
 
-func (rs Rows) Write(client *redis.Client) error {
+func (rs Rows) MSet(client *redis.Client) error {
     p := client.Pipeline()
     for _, row := range rs {
         row.AccuSet(p)
@@ -178,7 +179,6 @@ func main()  {
             DialTimeout:        30*time.Second,
             ReadTimeout:        30*time.Second,
             WriteTimeout:       30*time.Second,
-            TLSConfig:          nil,
         })
 
         scan = func(cid int) (rows Rows, newCid int, err error) {
@@ -214,7 +214,7 @@ func main()  {
             if err := rows.GetTypes(srcClient); err != nil {
                 return nil, -1, err
             }
-            if err := rows.GetValues(srcClient); err != nil {
+            if err := rows.MGet(srcClient); err != nil {
                 return nil, -1, err
             }
             return
@@ -222,12 +222,11 @@ func main()  {
 
         targetClient = redis.NewClient(&redis.Options{
             Network:            "tcp",
-            Addr:               "localhost:6379",
-            //Addr:               "ads.proxy.copi.live.sg.cloud.shopee.io:10078",
+            //Addr:               "localhost:6379",
+            Addr:               "ads.proxy.copi.live.sg.cloud.shopee.io:10078",
             DialTimeout:        30*time.Second,
             ReadTimeout:        30*time.Second,
             WriteTimeout:       30*time.Second,
-            TLSConfig:          nil,
         })
 
         cursorID = 0
@@ -244,7 +243,7 @@ func main()  {
             return
         }
 
-        if err = rows.Write(targetClient); err != nil {
+        if err = rows.MSet(targetClient); err != nil {
             log.Errorf("migration failed: '%v'", err)
             return
         }
