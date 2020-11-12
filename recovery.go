@@ -9,6 +9,8 @@ import (
     "time"
 )
 
+const DefaultExpire = time.Hour * 24 * 30 * 7
+
 type RedisType string
 
 const (
@@ -68,14 +70,16 @@ func (r *Row) ParseValue(cmder redis.Cmder) (interface{}, error) {
 func (r *Row) AccuSet(p redis.Pipeliner) {
     switch r.T {
     case RedisTypeString:
-        p.SetNX(r.K, r.V, 0)
+        p.SetNX(r.K, r.V, DefaultExpire)
     case RedisTypeHash:
         // TODO May change to string, does type matter?
         for k, v := range r.V.(map[string]string) {
             p.HSetNX(r.K, k, v)
         }
+        p.Expire(r.K, DefaultExpire)
     case RedisTypeZset:
         p.ZAddNX(r.K, r.V.([]redis.Z)...)
+        p.Expire(r.K, DefaultExpire)
     default:
         panic(fmt.Sprintf("unkown redis type %s", r.T))
     }
