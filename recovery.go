@@ -232,8 +232,7 @@ func main()  {
         cursorID = 0
     )
 
-    round := 0
-    for {
+    for round := 0;;round++{
         var (
         	rows Rows
         	err error
@@ -252,10 +251,9 @@ func main()  {
             break
         }
 
-        if (round+1) % 10 == 0 {
+        if round % 10 == 0 {
             fmt.Printf("round %d finished\n", round)
         }
-        round++
     }
     log.Infof("migration succeeded")
 }
