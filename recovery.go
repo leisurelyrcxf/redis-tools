@@ -10,12 +10,14 @@ import (
 )
 
 type RedisType string
+
 const (
     RedisTypeUnknown RedisType = ""
     RedisTypeString  RedisType = "string"
     RedisTypeHash    RedisType = "hash"
     RedisTypeZset    RedisType= "zset"
 )
+
 var RedisTypes = []RedisType{
     RedisTypeString,
     RedisTypeHash,
@@ -34,7 +36,7 @@ func parseRedisType(typeStr string) (RedisType, error) {
 type Row struct {
     K string
     T RedisType
-    V interface{}  // string, map[string]string, []Z
+    V interface{}  // string, map[string]string, []redis.Z
 }
 
 func (r *Row) AccuGet(p redis.Pipeliner) {
@@ -45,6 +47,8 @@ func (r *Row) AccuGet(p redis.Pipeliner) {
         p.HGetAll(r.K)
     case RedisTypeZset:
         p.ZRangeWithScores(r.K, 0, -1)
+    default:
+        panic(fmt.Sprintf("unkown redis type %s", r.T))
     }
 }
 
@@ -70,7 +74,9 @@ func (r *Row) AccuSet(p redis.Pipeliner) {
             p.HSetNX(r.K, k, v)
         }
     case RedisTypeZset:
-        p.ZAddNX(r.K, r.V.([]*redis.Z)...)
+        p.ZAddNX(r.K, r.V.([]redis.Z)...)
+    default:
+        panic(fmt.Sprintf("unkown redis type %s", r.T))
     }
 }
 
@@ -91,11 +97,9 @@ func (rs Rows) GetTypes(client *redis.Client) error {
             log.Errorf("cmd '%s' failed: %v", cmder.(*redis.StatusCmd).String(), err)
             return err
         }
-        typ, err := parseRedisType(typeString)
-        if err != nil {
+        if rs[idx].T, err = parseRedisType(typeString); err != nil {
             return err
         }
-        rs[idx].T = typ
     }
     return nil
 }
