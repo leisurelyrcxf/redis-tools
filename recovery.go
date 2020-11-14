@@ -42,7 +42,7 @@ type Row struct {
     NotExists bool
 }
 
-func (r *Row) AccuGet(p redis.Pipeliner) {
+func (r *Row) Get(p redis.Pipeliner) {
     switch r.T {
     case RedisTypeString:
         p.Get(r.K)
@@ -58,17 +58,29 @@ func (r *Row) AccuGet(p redis.Pipeliner) {
 func (r *Row) ParseValue(cmder redis.Cmder) (interface{}, error) {
     switch cmd := cmder.(type) {
     case *redis.StringCmd:
-        return cmd.Result()
+        ret, err := cmd.Result()
+        if err != nil {
+            log.Errorf("cmd '%s' failed: %v", cmd.String(), err)
+        }
+        return ret, err
     case *redis.StringStringMapCmd:
-        return cmd.Result()
+        ret, err := cmd.Result()
+        if err != nil {
+            log.Errorf("cmd '%s' failed: %v", cmd.String(), err)
+        }
+        return ret, err
     case *redis.ZSliceCmd:
-        return cmd.Result()
+        ret, err := cmd.Result()
+        if err != nil {
+            log.Errorf("cmd '%s' failed: %v", cmd.String(), err)
+        }
+        return ret, err
     default:
         panic(fmt.Sprintf("unknown cmder type %T", cmder))
     }
 }
 
-func (r *Row) AccuSet(p redis.Pipeliner) {
+func (r *Row) Set(p redis.Pipeliner) {
     switch r.T {
     case RedisTypeString:
         p.SetNX(r.K, r.V, DefaultExpire)
@@ -89,7 +101,7 @@ func (r *Row) AccuSet(p redis.Pipeliner) {
 
 type Rows []*Row
 
-func (rs Rows) GetTypes(client *redis.Client) error {
+func (rs Rows) types(client *redis.Client) error {
     p := client.Pipeline()
     for _, row := range rs {
         p.Type(row.K)
@@ -112,9 +124,13 @@ func (rs Rows) GetTypes(client *redis.Client) error {
 }
 
 func (rs Rows) MGet(client *redis.Client) error {
+    if err := rs.types(client); err != nil {
+        log.Errorf("can't get types: '%v'", err)
+        return err
+    }
     p := client.Pipeline()
     for _, row := range rs {
-        row.AccuGet(p)
+        row.Get(p)
     }
     cmders, cmdErr := p.Exec()
     if cmdErr != nil {
@@ -132,13 +148,16 @@ func (rs Rows) MGet(client *redis.Client) error {
 
 func (rs Rows) MSet(client *redis.Client) error {
     if err := rs.exists(client); err != nil {
+        log.Errorf("rs.exists failed: '%v'", err)
         return err
     }
 
     p := client.Pipeline()
     for _, row := range rs {
         if row.NotExists {
-            row.AccuSet(p)
+            row.Set(p)
+        } else {
+            log.Warnf("skip existed key %s", row.K)
         }
     }
     cmders, cmdErr := p.Exec()
@@ -157,7 +176,7 @@ func (rs Rows) exists(client *redis.Client) error {
     for idx, cmder := range cmders {
         existsVal, err := cmder.(*redis.IntCmd).Result()
         if err != nil {
-            log.Errorf("cmd '%s' failed: %v", cmder.(*redis.StatusCmd).String(), err)
+            log.Errorf("cmd '%s' failed: %v", cmder.(*redis.IntCmd).String(), err)
             return err
         }
         rs[idx].NotExists = existsVal == 0
@@ -243,9 +262,6 @@ func main()  {
                 rows = append(rows, &Row{K: key})
             }
 
-            if err := rows.GetTypes(srcClient); err != nil {
-                return nil, -1, err
-            }
             if err := rows.MGet(srcClient); err != nil {
                 return nil, -1, err
             }
