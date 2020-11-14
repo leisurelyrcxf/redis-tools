@@ -180,9 +180,9 @@ func main()  {
     	srcClient = redis.NewClient(&redis.Options{
             Network:            "tcp",
             Addr:               "10.129.100.195:11111",
-            DialTimeout:        30*time.Second,
-            ReadTimeout:        30*time.Second,
-            WriteTimeout:       30*time.Second,
+            DialTimeout:        120*time.Second,
+            ReadTimeout:        120*time.Second,
+            WriteTimeout:       120*time.Second,
         })
 
         scan = func(cid int) (rows Rows, newCid int, err error) {
@@ -228,9 +228,9 @@ func main()  {
             Network:            "tcp",
             //Addr:               "localhost:6379",
             Addr:               "ads.proxy.copi.live.sg.cloud.shopee.io:10078",
-            DialTimeout:        30*time.Second,
-            ReadTimeout:        30*time.Second,
-            WriteTimeout:       30*time.Second,
+            DialTimeout:        120*time.Second,
+            ReadTimeout:        120*time.Second,
+            WriteTimeout:       120*time.Second,
         })
 
         cursorID = 0
