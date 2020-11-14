@@ -39,6 +39,7 @@ type Row struct {
     K string
     T RedisType
     V interface{}  // string, map[string]string, []redis.Z
+    NotExists bool
 }
 
 func (r *Row) AccuGet(p redis.Pipeliner) {
@@ -72,10 +73,11 @@ func (r *Row) AccuSet(p redis.Pipeliner) {
     case RedisTypeString:
         p.SetNX(r.K, r.V, DefaultExpire)
     case RedisTypeHash:
-        // TODO May change to string, does type matter?
-        for k, v := range r.V.(map[string]string) {
-            p.HSetNX(r.K, k, v)
+        valueMap := make(map[string]interface{})
+        for k ,v := range r.V.(map[string]string) {
+            valueMap[k] = v
         }
+        p.HMSet(r.K, valueMap)
         p.Expire(r.K, DefaultExpire)
     case RedisTypeZset:
         p.ZAddNX(r.K, r.V.([]redis.Z)...)
@@ -129,12 +131,38 @@ func (rs Rows) MGet(client *redis.Client) error {
 }
 
 func (rs Rows) MSet(client *redis.Client) error {
+    if err := rs.exists(client); err != nil {
+        return err
+    }
+
     p := client.Pipeline()
     for _, row := range rs {
-        row.AccuSet(p)
+        if row.NotExists {
+            row.AccuSet(p)
+        }
     }
     cmders, cmdErr := p.Exec()
     return parseErr(cmders, cmdErr)
+}
+
+func (rs Rows) exists(client *redis.Client) error {
+    p := client.Pipeline()
+    for _, row := range rs {
+        p.Exists(row.K)
+    }
+    cmders, cmdErr := p.Exec()
+    if cmdErr != nil {
+        return cmdErr
+    }
+    for idx, cmder := range cmders {
+        existsVal, err := cmder.(*redis.IntCmd).Result()
+        if err != nil {
+            log.Errorf("cmd '%s' failed: %v", cmder.(*redis.StatusCmd).String(), err)
+            return err
+        }
+        rs[idx].NotExists = existsVal == 0
+    }
+    return nil
 }
 
 func parseErr(cmders []redis.Cmder, err error) error {
