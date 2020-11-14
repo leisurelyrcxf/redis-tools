@@ -1,6 +1,6 @@
 .PHONY: deps build binary
 
-REPO_PATH := ads-recovery 
+REPO_PATH := ads-recovery
 REVISION := $(shell git rev-parse HEAD || unknown)
 BUILTAT := $(shell date +%Y-%m-%dT%H:%M:%S)
 VERSION := $(shell git describe --tags $(shell git rev-list --tags --max-count=1))
