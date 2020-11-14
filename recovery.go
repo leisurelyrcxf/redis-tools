@@ -242,12 +242,12 @@ func main()  {
         	err error
         )
         if rows, cursorID, err = scan(cursorID); err != nil {
-            log.Errorf("migration failed: '%v'", err)
+            log.Errorf("scan failed: '%v'", err)
             return
         }
 
         if err = rows.MSet(targetClient); err != nil {
-            log.Errorf("migration failed: '%v'", err)
+            log.Errorf("MSet failed: '%v'", err)
             return
         }
 
@@ -255,7 +255,7 @@ func main()  {
             break
         }
 
-        if round % 10 == 0 {
+        if round % 100 == 0 {
             fmt.Printf("round %d finished\n", round)
         }
     }
