@@ -10,7 +10,7 @@ import (
     "time"
 )
 
-const DefaultExpire = time.Hour * 24 * 30 * 7
+var defaultExpire time.Duration = 0
 
 type RedisType string
 
@@ -40,7 +40,7 @@ type Row struct {
     K string
     T RedisType
     V interface{}  // string, map[string]string, []redis.Z
-    NotExists bool
+    TargetNotExists bool
 }
 
 func (r *Row) Get(p redis.Pipeliner) {
@@ -52,7 +52,7 @@ func (r *Row) Get(p redis.Pipeliner) {
     case RedisTypeZset:
         p.ZRangeWithScores(r.K, 0, -1)
     default:
-        panic(fmt.Sprintf("unkown redis type %s", r.T))
+        panic(fmt.Sprintf("unknown redis type %s", r.T))
     }
 }
 
@@ -84,19 +84,42 @@ func (r *Row) ParseValue(cmder redis.Cmder) (interface{}, error) {
 func (r *Row) Set(p redis.Pipeliner) {
     switch r.T {
     case RedisTypeString:
-        p.SetNX(r.K, r.V, DefaultExpire)
+        p.SetNX(r.K, r.V, defaultExpire)
     case RedisTypeHash:
         valueMap := make(map[string]interface{})
         for k ,v := range r.V.(map[string]string) {
             valueMap[k] = v
         }
+        if len(valueMap) == 0 {
+            log.Panicf("len(valueMap) == 0 for key %v(%v)", r.K, r.T)
+        }
         p.HMSet(r.K, valueMap)
-        p.Expire(r.K, DefaultExpire)
+        if defaultExpire > 0 {
+            p.Expire(r.K, defaultExpire)
+        }
     case RedisTypeZset:
+        if len(r.V.([]redis.Z)) == 0 {
+            log.Panicf("len(r.V.([]redis.Z)) == 0 for key %v(%v)", r.K, r.T)
+        }
         p.ZAddNX(r.K, r.V.([]redis.Z)...)
-        p.Expire(r.K, DefaultExpire)
+        if defaultExpire > 0 {
+            p.Expire(r.K, defaultExpire)
+        }
     default:
-        panic(fmt.Sprintf("unkown redis type %s", r.T))
+        panic(fmt.Sprintf("unknown redis type %s", r.T))
+    }
+}
+
+func (r *Row) IsValueEmpty() bool {
+    switch r.T {
+    case RedisTypeString:
+        return false
+    case RedisTypeHash:
+        return len(r.V.(map[string]string)) == 0
+    case RedisTypeZset:
+        return len(r.V.([]redis.Z)) == 0
+    default:
+        panic(fmt.Sprintf("unknown redis type %s", r.T))
     }
 }
 
@@ -147,16 +170,20 @@ func (rs Rows) MGet(client *redis.Client) error {
     return nil
 }
 
-func (rs Rows) MSet(client *redis.Client, notLogExistedKeys bool) error {
-    if err := rs.exists(client); err != nil {
+func (rs Rows) MSet(target *redis.Client, notLogExistedKeys bool) error {
+    if err := rs.exists(target); err != nil {
         log.Errorf("rs.exists failed: '%v'", err)
         return err
     }
 
-    p := client.Pipeline()
+    p := target.Pipeline()
     for _, row := range rs {
-        if row.NotExists {
-            row.Set(p)
+        if row.TargetNotExists {
+            if row.IsValueEmpty() {
+                log.Warnf("skip empty value of key %s, type: %v", row.K, row.T)
+            } else {
+                row.Set(p)
+            }
         } else if !notLogExistedKeys {
             log.Warnf("skip existed key %s", row.K)
         }
@@ -165,8 +192,8 @@ func (rs Rows) MSet(client *redis.Client, notLogExistedKeys bool) error {
     return parseErr(cmders, cmdErr)
 }
 
-func (rs Rows) exists(client *redis.Client) error {
-    p := client.Pipeline()
+func (rs Rows) exists(target *redis.Client) error {
+    p := target.Pipeline()
     for _, row := range rs {
         p.Exists(row.K)
     }
@@ -180,7 +207,7 @@ func (rs Rows) exists(client *redis.Client) error {
             log.Errorf("cmd '%s' failed: %v", cmder.(*redis.IntCmd).String(), err)
             return err
         }
-        rs[idx].NotExists = existsVal == 0
+        rs[idx].TargetNotExists = existsVal == 0
     }
     return nil
 }
@@ -219,8 +246,12 @@ func main()  {
     sourceAddr := flag.String("source-addr", "", "source addr")
     targetAddr := flag.String("target-addr", "", "target addr")
     notLogExistedKeys := flag.Bool("not-log-existed-keys", false, "not log existed keys")
+    expire := flag.Duration("expire", 0, "expire time")
 
     flag.Parse()
+    if *expire > 0 {
+        defaultExpire = *expire
+    }
     if *pSlot == -1 {
         log.Fatalf("slot not provided")
     }
