@@ -222,24 +222,19 @@ func main()  {
 
     flag.Parse()
     if *pSlot == -1 {
-        log.Errorf("slot not provided")
-        return
+        log.Fatalf("slot not provided")
     }
     if *sourceAddr == "" {
-        log.Errorf("source addr not provided")
-        return
+        log.Fatalf("source addr not provided")
     }
     if _, _, err := net.SplitHostPort(*sourceAddr); err != nil {
-        log.Errorf("source addr not valid: %v", err)
-        return
+        log.Fatalf("source addr not valid: %v", err)
     }
     if *targetAddr == "" {
-        log.Errorf("target addr not provided")
-        return
+        log.Fatalf("target addr not provided")
     }
     if _, _, err := net.SplitHostPort(*targetAddr); err != nil {
-        log.Errorf("target addr not valid: %v", err)
-        return
+        log.Fatalf("target addr not valid: %v", err)
     }
     log.Infof("migrating slot %d", *pSlot)
 
@@ -305,13 +300,11 @@ func main()  {
         	err error
         )
         if rows, cursorID, err = scan(cursorID); err != nil {
-            log.Errorf("scan failed: '%v'", err)
-            return
+            log.Fatalf("scan failed: '%v'", err)
         }
 
         if err = rows.MSet(targetClient, *notLogExistedKeys); err != nil {
-            log.Errorf("MSet failed: '%v'", err)
-            return
+            log.Fatalf("MSet failed: '%v'", err)
         }
 
         if cursorID == 0 {
@@ -319,7 +312,7 @@ func main()  {
         }
 
         if round % 100 == 0 {
-            fmt.Printf("round %d finished\n", round)
+            log.Infof("round %d finished", round)
         }
     }
     log.Infof("migration succeeded")
