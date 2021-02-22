@@ -5,6 +5,7 @@ import (
     "fmt"
     "github.com/go-redis/redis"
     log "github.com/sirupsen/logrus"
+    "net"
     "strconv"
     "time"
 )
@@ -215,10 +216,28 @@ func parseErr(cmders []redis.Cmder, err error) error {
 
 func main()  {
     pSlot := flag.Int("slot", -1, "slot, may be 3, 19, 31, 35, 38, 44, 51, 54, 57, 63")
+    sourceAddr := flag.String("source-addr", "", "source addr")
+    targetAddr := flag.String("target-addr", "", "target addr")
 
     flag.Parse()
     if *pSlot == -1 {
         log.Errorf("slot not provided")
+        return
+    }
+    if *sourceAddr == "" {
+        log.Errorf("source addr not provided")
+        return
+    }
+    if _, _, err := net.SplitHostPort(*sourceAddr); err != nil {
+        log.Errorf("source addr not valid: %v", err)
+        return
+    }
+    if *targetAddr == "" {
+        log.Errorf("target addr not provided")
+        return
+    }
+    if _, _, err := net.SplitHostPort(*targetAddr); err != nil {
+        log.Errorf("target addr not valid: %v", err)
         return
     }
     log.Infof("migrating slot %d", *pSlot)
@@ -226,7 +245,15 @@ func main()  {
     var (
     	srcClient = redis.NewClient(&redis.Options{
             Network:            "tcp",
-            Addr:               "10.129.100.195:11111",
+            Addr:               *sourceAddr,
+            DialTimeout:        120*time.Second,
+            ReadTimeout:        120*time.Second,
+            WriteTimeout:       120*time.Second,
+        })
+
+        targetClient = redis.NewClient(&redis.Options{
+            Network:            "tcp",
+            Addr:               *targetAddr,
             DialTimeout:        120*time.Second,
             ReadTimeout:        120*time.Second,
             WriteTimeout:       120*time.Second,
@@ -267,15 +294,6 @@ func main()  {
             }
             return
         }
-
-        targetClient = redis.NewClient(&redis.Options{
-            Network:            "tcp",
-            //Addr:               "localhost:6379",
-            Addr:               "ads.proxy.copi.live.sg.cloud.shopee.io:10078",
-            DialTimeout:        120*time.Second,
-            ReadTimeout:        120*time.Second,
-            WriteTimeout:       120*time.Second,
-        })
 
         cursorID = 0
     )
