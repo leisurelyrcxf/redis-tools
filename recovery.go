@@ -147,7 +147,7 @@ func (rs Rows) MGet(client *redis.Client) error {
     return nil
 }
 
-func (rs Rows) MSet(client *redis.Client) error {
+func (rs Rows) MSet(client *redis.Client, notLogExistedKeys bool) error {
     if err := rs.exists(client); err != nil {
         log.Errorf("rs.exists failed: '%v'", err)
         return err
@@ -157,7 +157,7 @@ func (rs Rows) MSet(client *redis.Client) error {
     for _, row := range rs {
         if row.NotExists {
             row.Set(p)
-        } else {
+        } else if !notLogExistedKeys {
             log.Warnf("skip existed key %s", row.K)
         }
     }
@@ -218,6 +218,7 @@ func main()  {
     pSlot := flag.Int("slot", -1, "slot, may be 3, 19, 31, 35, 38, 44, 51, 54, 57, 63")
     sourceAddr := flag.String("source-addr", "", "source addr")
     targetAddr := flag.String("target-addr", "", "target addr")
+    notLogExistedKeys := flag.Bool("not-log-existed-keys", false, "not log existed keys")
 
     flag.Parse()
     if *pSlot == -1 {
@@ -308,7 +309,7 @@ func main()  {
             return
         }
 
-        if err = rows.MSet(targetClient); err != nil {
+        if err = rows.MSet(targetClient, *notLogExistedKeys); err != nil {
             log.Errorf("MSet failed: '%v'", err)
             return
         }
