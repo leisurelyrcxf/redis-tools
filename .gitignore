@@ -2,3 +2,4 @@ vendor/*
 go.sum
 .idea/*
 ads-recovery
+flushdb

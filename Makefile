@@ -28,8 +28,13 @@ deps:
 	env GO111MODULE=on go mod download
 	env GO111MODULE=on go mod vendor
 
-binary:
-	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o ads-recovery
+recovery:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o ads-recovery ./cmd/recovery
+
+flushdb:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o flushdb ./cmd/flushdb
+
+binary: recovery flushdb
 
 build: deps binary
 
