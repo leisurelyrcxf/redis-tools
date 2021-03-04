@@ -32,7 +32,7 @@ recovery:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o ads-recovery ./cmd/recovery
 
 flushdb:
-	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o flushdb ./cmd/flushdb
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o flushall ./cmd/flushdb
 
 binary: recovery flushdb
 
