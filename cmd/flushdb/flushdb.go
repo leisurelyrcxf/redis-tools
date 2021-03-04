@@ -81,7 +81,7 @@ func main()  {
             }
 
             if cursorID == 0 {
-                if slot % 256 == 0 {
+                if (slot+1) % 256 == 0 {
                     log.Infof("del all keys of slot %d", slot)
                 }
                 break
