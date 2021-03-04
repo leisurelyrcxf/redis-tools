@@ -16,6 +16,8 @@ func main()  {
     sourceAddr := flag.String("source-addr", "", "source addr")
     targetAddr := flag.String("target-addr", "", "target addr")
     notLogExistedKeys := flag.Bool("not-log-existed-keys", false, "not log existed keys")
+    dataType := flag.String("data-type", "", "data types could be 'string', 'hash', 'zset'")
+    overwriteExistedKeys := flag.Bool("overwrite", false, "overwrite existed keys")
     expire := flag.Duration("expire", 0, "expire time")
 
     flag.Parse()
@@ -37,7 +39,14 @@ func main()  {
     if _, _, err := net.SplitHostPort(*targetAddr); err != nil {
         log.Fatalf("target addr not valid: %v", err)
     }
-    log.Infof("migrating slot %d", *pSlot)
+    var redisType = cmd.RedisTypeUnknown
+    if *dataType != "" {
+        var err error
+        if redisType, err = cmd.ParseRedisType(*dataType); err != nil {
+            log.Fatalf("unknown data type: %v", *dataType)
+        }
+    }
+    log.Infof("migrating slot %d, data type: '%s', overwrite existed keys: %v", *pSlot, redisType, overwriteExistedKeys)
 
     var (
         srcClient = redis.NewClient(&redis.Options{
@@ -86,6 +95,16 @@ func main()  {
                 rows = append(rows, &cmd.Row{K: key})
             }
 
+            if redisType != cmd.RedisTypeUnknown {
+                for _, row := range rows {
+                    row.T = redisType
+                }
+            }
+            if *overwriteExistedKeys {
+                for _, row := range rows {
+                    row.OverwriteExistedKeys = true
+                }
+            }
             if err := rows.MGet(srcClient); err != nil {
                 return nil, -1, err
             }

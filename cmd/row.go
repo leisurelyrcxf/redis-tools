@@ -24,7 +24,7 @@ var RedisTypes = []RedisType{
     RedisTypeZset,
 }
 
-func parseRedisType(typeStr string) (RedisType, error) {
+func ParseRedisType(typeStr string) (RedisType, error) {
     for _, redisType := range RedisTypes {
         if string(redisType) == typeStr {
             return redisType, nil
@@ -35,8 +35,9 @@ func parseRedisType(typeStr string) (RedisType, error) {
 
 type Row struct {
     K string
-    T RedisType
-    V interface{}  // string, map[string]string, []redis.Z
+    T                    RedisType
+    OverwriteExistedKeys bool
+    V                    interface{}  // string, map[string]string, []redis.Z
     TargetNotExists bool
 }
 
@@ -141,7 +142,7 @@ func (rs Rows) types(client *redis.Client) error {
             log.Errorf("cmd '%s' failed: %v", cmder.(*redis.StatusCmd).String(), err)
             return err
         }
-        if rs[idx].T, err = parseRedisType(typeString); err != nil {
+        if rs[idx].T, err = ParseRedisType(typeString); err != nil {
             return err
         }
     }
@@ -149,10 +150,16 @@ func (rs Rows) types(client *redis.Client) error {
 }
 
 func (rs Rows) MGet(client *redis.Client) error {
-    if err := rs.types(client); err != nil {
-        log.Errorf("can't get types: '%v'", err)
-        return err
+    if len(rs) == 0 {
+        return nil
     }
+    if rs[0].T == RedisTypeUnknown {
+        if err := rs.types(client); err != nil {
+            log.Errorf("can't get types: '%v'", err)
+            return err
+        }
+    }
+    // TODO ignore wrong types error
     p := client.Pipeline()
     for _, row := range rs {
         row.Get(p)
@@ -172,14 +179,19 @@ func (rs Rows) MGet(client *redis.Client) error {
 }
 
 func (rs Rows) MSet(target *redis.Client, notLogExistedKeys bool) error {
-    if err := rs.exists(target); err != nil {
-        log.Errorf("rs.exists failed: '%v'", err)
-        return err
+    if len(rs) == 0 {
+        return nil
+    }
+    if !rs[0].OverwriteExistedKeys {
+        if err := rs.exists(target); err != nil {
+            log.Errorf("rs.exists failed: '%v'", err)
+            return err
+        }
     }
 
     p := target.Pipeline()
     for _, row := range rs {
-        if row.TargetNotExists {
+        if row.OverwriteExistedKeys || row.TargetNotExists {
             if row.IsValueEmpty() {
                 log.Warnf("skip empty value of key %s, type: %v", row.K, row.T)
             } else {
