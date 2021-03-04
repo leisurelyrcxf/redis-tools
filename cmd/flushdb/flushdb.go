@@ -67,7 +67,7 @@ func main()  {
 
     for slot := 0; slot < 16384; slot++ {
         var cursorID = 0
-        for round:=0; ; round++ {
+        for round := 1; ; round++ {
             var (
                 rows cmd.Rows
                 err  error
@@ -81,7 +81,9 @@ func main()  {
             }
 
             if cursorID == 0 {
-                log.Infof("del all keys of slot %d", slot)
+                if slot % 256 == 0 {
+                    log.Infof("del all keys of slot %d", slot)
+                }
                 break
             }
 
