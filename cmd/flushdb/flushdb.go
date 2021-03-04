@@ -33,7 +33,7 @@ func main()  {
         })
 
         scan = func(cid int, slot int) (rows cmd.Rows, newCid int, err error) {
-            result, err := srcClient.Do([]interface{}{"SLOTSSCAN", slot, cid}...).Result()
+            result, err := srcClient.Do([]interface{}{"SLOTSSCAN", slot, cid, "count", 100000000}...).Result()
             if err != nil {
                 log.Errorf("slotsscan failed: '%v'", err)
                 return nil, 0, err
