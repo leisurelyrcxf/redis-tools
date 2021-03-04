@@ -57,7 +57,7 @@ func main()  {
         })
 
         scan = func(cid int) (rows cmd.Rows, newCid int, err error) {
-            result, err := srcClient.Do([]interface{}{"SLOTSSCAN", *pSlot, cid}...).Result()
+            result, err := srcClient.Do([]interface{}{"SLOTSSCAN", *pSlot, cid, "count", 10000}...).Result()
             if err != nil {
                 log.Errorf("slotsscan failed: '%v'", err)
                 return nil, 0, err
