@@ -19,6 +19,7 @@ func main()  {
     dataType := flag.String("data-type", "", "data types could be 'string', 'hash', 'zset'")
     overwriteExistedKeys := flag.Bool("overwrite", false, "overwrite existed keys")
     expire := flag.Duration("expire", 0, "expire time")
+    batchSize := flag.Int("batch-size", 10000, "batch size")
 
     flag.Parse()
     if *expire > 0 {
@@ -66,7 +67,7 @@ func main()  {
         })
 
         scan = func(cid int) (rows cmd.Rows, newCid int, err error) {
-            result, err := srcClient.Do([]interface{}{"SLOTSSCAN", *pSlot, cid, "count", 10000}...).Result()
+            result, err := srcClient.Do([]interface{}{"SLOTSSCAN", *pSlot, cid, "count", *batchSize}...).Result()
             if err != nil {
                 log.Errorf("slotsscan failed: '%v'", err)
                 return nil, 0, err
