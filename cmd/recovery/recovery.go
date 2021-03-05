@@ -109,7 +109,7 @@ func main()  {
             if err := rows.MGet(srcClient); err != nil {
                 return nil, -1, err
             }
-            return
+            return rows, newCid, nil
         }
 
         cursorID = 0

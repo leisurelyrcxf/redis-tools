@@ -117,9 +117,9 @@ func (r *Row) IsValueEmpty() bool {
     case RedisTypeString:
         return false
     case RedisTypeHash:
-        return len(r.V.(map[string]string)) == 0
+        return r.V == nil || len(r.V.(map[string]string)) == 0
     case RedisTypeZset:
-        return len(r.V.([]redis.Z)) == 0
+        return r.V == nil || len(r.V.([]redis.Z)) == 0
     default:
         panic(fmt.Sprintf("unknown redis type %s", r.T))
     }
@@ -166,6 +166,7 @@ func (rs Rows) MGet(client *redis.Client) error {
     }
     cmders, cmdErr := p.Exec()
     if cmdErr != nil {
+        log.Errorf("Rows::MGet pipeline execution failed: %v", cmdErr)
         return cmdErr
     }
     for idx, cmder := range cmders {
