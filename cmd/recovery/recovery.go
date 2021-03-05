@@ -8,6 +8,7 @@ import (
     log "github.com/sirupsen/logrus"
     "net"
     "strconv"
+    "sync"
     "time"
 )
 
@@ -19,7 +20,10 @@ func main()  {
     dataType := flag.String("data-type", "", "data types could be 'string', 'hash', 'zset'")
     overwriteExistedKeys := flag.Bool("overwrite", false, "overwrite existed keys")
     expire := flag.Duration("expire", 0, "expire time")
-    batchSize := flag.Int("batch-size", 10000, "batch size")
+    batchSize := flag.Int("batch-size", 100, "batch size")
+    readerCount := flag.Int("reader", 15, "reader count")
+    writerCount := flag.Int("writer", 15, "writer count")
+    maxBufferered := flag.Int("max-buffered", 1024, "max buffered batch size")
 
     flag.Parse()
     if *expire > 0 {
@@ -106,37 +110,80 @@ func main()  {
                     row.OverwriteExistedKeys = true
                 }
             }
-            if err := rows.MGet(srcClient); err != nil {
-                return nil, -1, err
-            }
             return rows, newCid, nil
         }
 
         cursorID = 0
     )
 
+
+    var (
+        readerWg sync.WaitGroup
+
+        rawRowsCh       = make(chan cmd.Rows, *maxBufferered)
+        rowsWithValueCh = make(chan cmd.Rows, *maxBufferered)
+    )
+
+    for i := 0; i < *readerCount; i++ {
+        readerWg.Add(1)
+
+        go func() {
+            defer readerWg.Done()
+
+            for rows := range rawRowsCh {
+                if err := rows.MGet(srcClient); err != nil {
+                   log.Fatalf("rows.MGet failed: %v", err)
+                }
+                rowsWithValueCh <- rows
+            }
+        }()
+    }
+
+    go func() {
+        readerWg.Wait()
+        log.Infof("all readers finished, close rowsWithValueCh")
+        close(rowsWithValueCh)
+    }()
+
+    var writerWg sync.WaitGroup
+    for i := 0; i < *writerCount; i++ {
+        writerWg.Add(1)
+
+        go func() {
+            defer writerWg.Done()
+
+            for rows := range rowsWithValueCh {
+                if err := rows.MSet(targetClient, *notLogExistedKeys); err != nil {
+                    log.Fatalf("rows.MSet failed: '%v'", err)
+                }
+            }
+        }()
+    }
+
     start := time.Now()
-    for round := 0;;round++{
+    for round := 0; ;round++ {
         var (
-            rows cmd.Rows
-            err error
+            rawRows cmd.Rows
+            err     error
         )
-        if rows, cursorID, err = scan(cursorID); err != nil {
+        if rawRows, cursorID, err = scan(cursorID); err != nil {
             log.Fatalf("scan failed: '%v'", err)
         }
 
-        if err = rows.MSet(targetClient, *notLogExistedKeys); err != nil {
-            log.Fatalf("MSet failed: '%v'", err)
-        }
+        rawRowsCh <- rawRows
 
         if cursorID == 0 {
+            close(rawRowsCh)
             break
         }
 
-        if round % 100 == 0 {
-            log.Infof("round %d finished in %v", round, time.Since(start))
+        if round%100 == 0 {
+            log.Infof("scan round %d finished in %v", round, time.Since(start))
             start = time.Now()
         }
     }
+
+    readerWg.Wait()
+    writerWg.Wait()
     log.Infof("migration succeeded")
 }
