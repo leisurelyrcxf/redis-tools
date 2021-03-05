@@ -115,6 +115,7 @@ func main()  {
         cursorID = 0
     )
 
+    start := time.Now()
     for round := 0;;round++{
         var (
             rows cmd.Rows
@@ -133,7 +134,8 @@ func main()  {
         }
 
         if round % 100 == 0 {
-            log.Infof("round %d finished", round)
+            log.Infof("round %d finished in %v", round, time.Since(start))
+            start = time.Now()
         }
     }
     log.Infof("migration succeeded")

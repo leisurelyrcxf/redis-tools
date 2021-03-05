@@ -117,9 +117,9 @@ func (r *Row) IsValueEmpty() bool {
     case RedisTypeString:
         return false
     case RedisTypeHash:
-        return r.V == nil || len(r.V.(map[string]string)) == 0
+        return len(r.V.(map[string]string)) == 0
     case RedisTypeZset:
-        return r.V == nil || len(r.V.([]redis.Z)) == 0
+        return len(r.V.([]redis.Z)) == 0
     default:
         panic(fmt.Sprintf("unknown redis type %s", r.T))
     }
@@ -193,7 +193,9 @@ func (rs Rows) MSet(target *redis.Client, notLogExistedKeys bool) error {
     p := target.Pipeline()
     for _, row := range rs {
         if row.OverwriteExistedKeys || row.TargetNotExists {
-            if row.IsValueEmpty() {
+            if row.V == nil {
+                log.Warnf("skip nil value of key %s, type: %v", row.K, row.T)
+            } else if row.IsValueEmpty() {
                 log.Warnf("skip empty value of key %s, type: %v", row.K, row.T)
             } else {
                 row.Set(p)
