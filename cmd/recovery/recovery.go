@@ -47,7 +47,7 @@ func main()  {
             log.Fatalf("unknown data type: %v", *dataType)
         }
     }
-    log.Infof("migrating slot %d, data type: '%s', overwrite existed keys: %v", *pSlot, redisType, overwriteExistedKeys)
+    log.Infof("migrating slot %d, data type: '%s', overwrite existed keys: %v", *pSlot, redisType, *overwriteExistedKeys)
 
     var (
         srcClient = redis.NewClient(&redis.Options{
