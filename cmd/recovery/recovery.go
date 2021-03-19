@@ -6,10 +6,18 @@ import (
     "fmt"
     "github.com/go-redis/redis"
     log "github.com/sirupsen/logrus"
+    "io"
     "net"
     "strconv"
+    "strings"
     "sync"
+    "sync/atomic"
     "time"
+)
+
+const (
+    maxRetry      = 10
+    retryInterval = time.Second*5
 )
 
 func main()  {
@@ -23,7 +31,7 @@ func main()  {
     batchSize := flag.Int("batch-size", 100, "batch size")
     readerCount := flag.Int("reader", 15, "reader count")
     writerCount := flag.Int("writer", 15, "writer count")
-    maxBufferered := flag.Int("max-buffered", 1024, "max buffered batch size")
+    maxBuffered := flag.Int("max-buffered", 1024, "max buffered batch size")
 
     flag.Parse()
     if *expire > 0 {
@@ -57,17 +65,21 @@ func main()  {
         srcClient = redis.NewClient(&redis.Options{
             Network:            "tcp",
             Addr:               *sourceAddr,
-            DialTimeout:        120*time.Second,
-            ReadTimeout:        120*time.Second,
-            WriteTimeout:       120*time.Second,
+            DialTimeout:        240*time.Second,
+            ReadTimeout:        240*time.Second,
+            WriteTimeout:       240*time.Second,
+            PoolSize:50,
+            IdleCheckFrequency: time.Second*10,
         })
 
         targetClient = redis.NewClient(&redis.Options{
             Network:            "tcp",
             Addr:               *targetAddr,
-            DialTimeout:        120*time.Second,
-            ReadTimeout:        120*time.Second,
-            WriteTimeout:       120*time.Second,
+            DialTimeout:        240*time.Second,
+            ReadTimeout:        240*time.Second,
+            WriteTimeout:       240*time.Second,
+            PoolSize: 50,
+            IdleCheckFrequency: time.Second*10,
         })
 
         scan = func(cid int) (rows cmd.Rows, newCid int, err error) {
@@ -113,15 +125,19 @@ func main()  {
             return rows, newCid, nil
         }
 
-        cursorID = 0
+        isRetryableErr = func(err error) bool {
+            return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
+        }
     )
 
 
     var (
         readerWg sync.WaitGroup
 
-        rawRowsCh       = make(chan cmd.Rows, *maxBufferered)
-        rowsWithValueCh = make(chan cmd.Rows, *maxBufferered)
+        rawRowsCh       = make(chan cmd.Rows, *maxBuffered)
+        rowsWithValueCh = make(chan cmd.Rows, *maxBuffered)
+
+        successfulReadBatches int64
     )
 
     for i := 0; i < *readerCount; i++ {
@@ -131,10 +147,21 @@ func main()  {
             defer readerWg.Done()
 
             for rows := range rawRowsCh {
-                if err := rows.MGet(srcClient); err != nil {
-                   log.Fatalf("rows.MGet failed: %v", err)
+                for i := 0; ; i++ {
+                    if err := rows.MGet(srcClient); err != nil {
+                        if i >= maxRetry- 1 || !isRetryableErr(err) {
+                            log.Errorf("[Manual] Read failed: %v @round %d, keys: %v", err, i, rows.Keys())
+                            break
+                        }
+                        log.Errorf("Read failed: '%v' @round %d, retrying in %s...", err, i, retryInterval)
+                        time.Sleep(retryInterval)
+                        continue
+                    }
+                    rowsWithValueCh <- rows
+                    tmp := atomic.AddInt64(&successfulReadBatches, 1)
+                    log.Infof("Read %d batches successfully @round %d", tmp, i)
+                    break
                 }
-                rowsWithValueCh <- rows
             }
         }()
     }
@@ -145,7 +172,10 @@ func main()  {
         close(rowsWithValueCh)
     }()
 
-    var writerWg sync.WaitGroup
+    var (
+        writerWg               sync.WaitGroup
+        successfulWriteBatches int64
+    )
     for i := 0; i < *writerCount; i++ {
         writerWg.Add(1)
 
@@ -153,37 +183,84 @@ func main()  {
             defer writerWg.Done()
 
             for rows := range rowsWithValueCh {
-                if err := rows.MSet(targetClient, *notLogExistedKeys); err != nil {
-                    log.Fatalf("rows.MSet failed: '%v'", err)
+                for i := 0; ; i++ {
+                    if err := rows.MSet(targetClient, *notLogExistedKeys); err != nil {
+                        if i >= maxRetry- 1 || !isRetryableErr(err) {
+                            log.Errorf("[Manual] Write failed: '%v' @round %d, keys: %v", err, i, rows.Keys())
+                            break
+                        }
+                        log.Errorf("Write failed: '%v' @round %d, retrying in %s...", err, i, retryInterval)
+                        time.Sleep(retryInterval)
+                        continue
+                    }
+                    tmp := atomic.AddInt64(&successfulWriteBatches, 1)
+                    log.Infof("Written %d batches successfully @round %d ", tmp, i)
+                    break
                 }
             }
         }()
     }
 
-    start := time.Now()
-    for round := 0; ;round++ {
+
+    var (
+        cursorID = 0
+        scannedBatches int64
+        start = time.Now()
+    )
+    for rounds := 0; ; rounds++ {
         var (
             rawRows cmd.Rows
             err     error
         )
-        if rawRows, cursorID, err = scan(cursorID); err != nil {
-            log.Fatalf("scan failed: '%v'", err)
+
+        for i :=0; ; i++ {
+            var newCursorID int
+            if rawRows, newCursorID, err = scan(cursorID); err != nil {
+                if i >= maxRetry- 1 {
+                    log.Fatalf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
+                    return
+                }
+                log.Errorf("scan cursor %d failed: '%v' @round %d, retrying in %s...", cursorID, err, i, retryInterval)
+                time.Sleep(retryInterval)
+                continue
+            }
+            cursorID = newCursorID
+            scannedBatches++
+            break
         }
 
         rawRowsCh <- rawRows
-
         if cursorID == 0 {
             close(rawRowsCh)
             break
         }
 
-        if round%100 == 0 {
-            log.Infof("scan round %d finished in %v", round, time.Since(start))
+        if rounds%100 == 0 {
+            log.Infof("scanned %d batches in %v successfully", scannedBatches, time.Since(start))
             start = time.Now()
         }
     }
 
     readerWg.Wait()
     writerWg.Wait()
-    log.Infof("migration succeeded")
+    failedReadBatches, failedWriteBatches := scannedBatches-successfulReadBatches, successfulReadBatches-successfulWriteBatches
+    if failedReadBatches == 0 && failedWriteBatches == 0 {
+        log.Infof("migration succeeded")
+    } else {
+        if failedReadBatches > 0 {
+            log.Errorf("%d read batches failed", failedReadBatches)
+        }
+        if failedWriteBatches > 0 {
+            log.Errorf("%d write batches failed", failedWriteBatches)
+        }
+        if failedReadBatches < 0 && failedWriteBatches < 0 {
+            log.Fatalf("successfulReadBatches > scannedBatches && successfulWriteBatches > successfulReadBatches")
+        }
+        if failedReadBatches < 0 {
+            log.Fatalf("successfulReadBatches > scannedBatches")
+        }
+        if failedWriteBatches < 0 {
+            log.Fatalf("successfulWriteBatches > successfulReadBatches")
+        }
+    }
 }

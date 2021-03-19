@@ -127,6 +127,14 @@ func (r *Row) IsValueEmpty() bool {
 
 type Rows []*Row
 
+func (rs Rows) Keys() []string{
+    keys := make([]string, len(rs))
+    for i, r := range rs {
+        keys[i] = r.K
+    }
+    return keys
+}
+
 func (rs Rows) types(client *redis.Client) error {
     p := client.Pipeline()
     for _, row := range rs {

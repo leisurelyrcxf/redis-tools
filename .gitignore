@@ -1,5 +1,5 @@
 vendor/*
 go.sum
 .idea/*
-ads-recovery
+recovery
 flushall

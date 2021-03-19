@@ -30,6 +30,7 @@ func main()  {
             DialTimeout:        120*time.Second,
             ReadTimeout:        120*time.Second,
             WriteTimeout:       120*time.Second,
+            IdleCheckFrequency: time.Second*10,
         })
 
         scan = func(cid int, slot int) (rows cmd.Rows, newCid int, err error) {

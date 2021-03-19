@@ -1,6 +1,6 @@
 .PHONY: deps build binary
 
-REPO_PATH := ads-recovery
+REPO_PATH := recovery
 REVISION := $(shell git rev-parse HEAD || unknown)
 BUILTAT := $(shell date +%Y-%m-%dT%H:%M:%S)
 VERSION := $(shell git describe --tags $(shell git rev-list --tags --max-count=1))
@@ -29,7 +29,7 @@ deps:
 	env GO111MODULE=on go mod vendor
 
 recovery:
-	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o ads-recovery ./cmd/recovery
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o recovery ./cmd/recovery
 
 flushdb:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o flushall ./cmd/flushdb
