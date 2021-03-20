@@ -85,7 +85,6 @@ func main()  {
         scan = func(cid int) (rows cmd.Rows, newCid int, err error) {
             result, err := srcClient.Do([]interface{}{"SLOTSSCAN", *pSlot, cid, "count", *batchSize}...).Result()
             if err != nil {
-                log.Errorf("slotsscan failed: '%v'", err)
                 return nil, 0, err
             }
             resultArray, ok := result.([]interface{})
@@ -137,7 +136,7 @@ func main()  {
         rawRowsCh       = make(chan cmd.Rows, *maxBuffered)
         rowsWithValueCh = make(chan cmd.Rows, *maxBuffered)
 
-        successfulReadBatches int64
+        successfulReadBatches,  failedReadBatches int64
     )
 
     for i := 0; i < *readerCount; i++ {
@@ -150,10 +149,11 @@ func main()  {
                 for i := 0; ; i++ {
                     if err := rows.MGet(srcClient); err != nil {
                         if i >= maxRetry- 1 || !isRetryableErr(err) {
+                            atomic.AddInt64(&failedReadBatches, 1)
                             log.Errorf("[Manual] Read failed: %v @round %d, keys: %v", err, i, rows.Keys())
                             break
                         }
-                        log.Errorf("Read failed: '%v' @round %d, retrying in %s...", err, i, retryInterval)
+                        log.Warnf("Read failed: '%v' @round %d, retrying in %s...", err, i, retryInterval)
                         time.Sleep(retryInterval)
                         continue
                     }
@@ -174,7 +174,7 @@ func main()  {
 
     var (
         writerWg               sync.WaitGroup
-        successfulWriteBatches int64
+        successfulWriteBatches, failedWriteBatches int64
     )
     for i := 0; i < *writerCount; i++ {
         writerWg.Add(1)
@@ -186,10 +186,11 @@ func main()  {
                 for i := 0; ; i++ {
                     if err := rows.MSet(targetClient, *notLogExistedKeys); err != nil {
                         if i >= maxRetry- 1 || !isRetryableErr(err) {
+                            atomic.AddInt64(&failedWriteBatches, 1)
                             log.Errorf("[Manual] Write failed: '%v' @round %d, keys: %v", err, i, rows.Keys())
                             break
                         }
-                        log.Errorf("Write failed: '%v' @round %d, retrying in %s...", err, i, retryInterval)
+                        log.Warnf("Write failed: '%v' @round %d, retrying in %s...", err, i, retryInterval)
                         time.Sleep(retryInterval)
                         continue
                     }
@@ -243,7 +244,6 @@ func main()  {
 
     readerWg.Wait()
     writerWg.Wait()
-    failedReadBatches, failedWriteBatches := scannedBatches-successfulReadBatches, successfulReadBatches-successfulWriteBatches
     if failedReadBatches == 0 && failedWriteBatches == 0 {
         log.Infof("migration succeeded")
     } else {
@@ -253,14 +253,17 @@ func main()  {
         if failedWriteBatches > 0 {
             log.Errorf("%d write batches failed", failedWriteBatches)
         }
-        if failedReadBatches < 0 && failedWriteBatches < 0 {
-            log.Fatalf("successfulReadBatches > scannedBatches && successfulWriteBatches > successfulReadBatches")
-        }
-        if failedReadBatches < 0 {
-            log.Fatalf("successfulReadBatches > scannedBatches")
-        }
-        if failedWriteBatches < 0 {
-            log.Fatalf("successfulWriteBatches > successfulReadBatches")
-        }
+    }
+    if failedReadBatches + successfulReadBatches != scannedBatches && failedWriteBatches + successfulWriteBatches != successfulReadBatches{
+        log.Fatalf("failedReadBatches(%d) + successfulReadBatches(%d) != scannedBatches(%d) && failedWriteBatches(%d) + successfulWriteBatches(%d) != successfulReadBatches(%d)",
+            failedReadBatches, successfulReadBatches, scannedBatches, failedWriteBatches, successfulWriteBatches, successfulReadBatches)
+    }
+    if failedReadBatches + successfulReadBatches != scannedBatches {
+        log.Fatalf("failedReadBatches(%d) + successfulReadBatches(%d) != scannedBatches(%d)",
+            failedReadBatches, successfulReadBatches, scannedBatches)
+    }
+    if failedWriteBatches + successfulWriteBatches != successfulReadBatches{
+        log.Fatalf("failedWriteBatches(%d) + successfulWriteBatches(%d) != successfulReadBatches(%d)",
+            failedWriteBatches, successfulWriteBatches, successfulReadBatches)
     }
 }
