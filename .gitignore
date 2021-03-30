@@ -3,3 +3,4 @@ go.sum
 .idea/*
 recovery
 flushall
+cleanup

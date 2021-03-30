@@ -31,10 +31,13 @@ deps:
 recovery:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o recovery ./cmd/recovery
 
+cleanup:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o cleanup ./cmd/cleanup
+
 flushdb:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o flushall ./cmd/flushdb
 
-binary: recovery flushdb
+binary: recovery flushdb cleanup
 
 build: deps binary
 
