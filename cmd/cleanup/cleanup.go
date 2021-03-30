@@ -6,8 +6,12 @@ import (
     "fmt"
     "github.com/go-redis/redis"
     log "github.com/sirupsen/logrus"
+    "io"
     "net"
     "strconv"
+    "strings"
+    "sync"
+    "sync/atomic"
     "time"
 )
 
@@ -20,13 +24,17 @@ func main()  {
     if *addr == "" {
         log.Fatalf("source addr not provided")
     }
-    if *maxSlotNum == 0 && *slot == 0 {
-        log.Fatalf("max slot number is 0 && slot == 0")
-    }
     if _, _, err := net.SplitHostPort(*addr); err != nil {
         log.Fatalf("source addr not valid: %v", err)
     }
-    log.Infof("cleanup %s", *addr)
+    if *maxSlotNum == 0 && *slot == -1 {
+        log.Fatalf("max slot number is 0 && slot == 0")
+    }
+    if *maxSlotNum != 0 {
+        log.Infof("cleanup all slots[0, %d) of %s", *maxSlotNum, *addr)
+    } else {
+        log.Infof("cleanup slot %d of %s", *slot, *addr)
+    }
 
     var (
         cli = redis.NewClient(&redis.Options{
@@ -39,10 +47,9 @@ func main()  {
             IdleCheckFrequency: time.Second*10,
         })
 
-        scan = func(cid int, slot int) (rows cmd.Rows, newCid int, err error) {
-            result, err := cli.Do([]interface{}{"SLOTSSCAN", slot, cid, "count", 100000000}...).Result()
+        scan = func(slot int, cid int, batchSize int) (rows cmd.Rows, newCid int, err error) {
+            result, err := cli.Do([]interface{}{"SLOTSSCAN", slot, cid, "count", batchSize}...).Result()
             if err != nil {
-                log.Errorf("slotsscan failed: '%v'", err)
                 return nil, 0, err
             }
             resultArray, ok := result.([]interface{})
@@ -68,9 +75,59 @@ func main()  {
                 }
                 rows = append(rows, &cmd.Row{K: key})
             }
+
             return rows, newCid, nil
         }
     )
+
+    const batchSize = 50
+
+    var (
+        readerWg sync.WaitGroup
+        maxBuffered = 10000
+        rawRowsCh       = make(chan cmd.Rows, maxBuffered)
+
+        successfulReadBatches,  failedReadBatches int64
+        maxRetry = 10
+
+        isRetryableErr = func(err error) bool {
+            return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
+        }
+        retryInterval = time.Second * 10
+        readerCount = 30
+    )
+
+    for i := 0; i < readerCount; i++ {
+        readerWg.Add(1)
+
+        go func() {
+            defer readerWg.Done()
+
+            for rows := range rawRowsCh {
+                for i := 0; ; i++ {
+                    if err := rows.MGet(cli); err != nil {
+                        if i >= maxRetry- 1 || !isRetryableErr(err) {
+                            atomic.AddInt64(&failedReadBatches, 1)
+                            log.Errorf("[Manual] Read failed: %v @round %d, keys: %v", err, i, rows.Keys())
+                            break
+                        }
+                        log.Warnf("Read failed: '%v' @round %d, retrying in %s...", err, i, retryInterval)
+                        time.Sleep(retryInterval)
+                        continue
+                    }
+                    tmp := atomic.AddInt64(&successfulReadBatches, 1)
+                    log.Infof("Read %d batches successfully @round %d", tmp, i)
+
+                    for _, row := range rows {
+                        if row.IsValueEmpty() {
+                            log.Infof("%s key '%s' is empty", row.T, row.K)
+                        }
+                    }
+                    break
+                }
+            }
+        }()
+    }
 
     var slots []int
     if *maxSlotNum != 0 {
@@ -80,36 +137,46 @@ func main()  {
     } else {
         slots = append(slots, *slot)
     }
+
+    var scannedBatches int
     for _, slot := range slots {
         var cursorID = 0
         for round := 1; ; round++ {
             var (
-                rows cmd.Rows
+                rawRows cmd.Rows
                 err  error
             )
-            if rows, cursorID, err = scan(cursorID, slot); err != nil {
-                log.Fatalf("scan slot %d failed: '%v'", slot, err)
-            }
 
-            if err = rows.MGet(cli); err != nil {
-                log.Fatalf("MGet rows of slot %d failed: '%v'", slot, err)
-            }
-
-            for _, row := range rows {
-                if row.IsValueEmpty() {
-                    log.Infof("key %s is empty", row.K)
+            for i :=0; ; i++ {
+                var newCursorID int
+                if rawRows, newCursorID, err = scan(slot, cursorID, batchSize); err != nil {
+                    if i >= maxRetry- 1 {
+                        log.Fatalf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
+                        return
+                    }
+                    log.Errorf("scan cursor %d failed: '%v' @round %d, retrying in %s...", cursorID, err, i, retryInterval)
+                    time.Sleep(retryInterval)
+                    continue
                 }
+                cursorID = newCursorID
+                scannedBatches++
+                break
             }
 
+            rawRowsCh <- rawRows
             if cursorID == 0 {
-                log.Infof("cleanup all keys of slot %d", slot)
+                log.Infof("scanned all keys of slot %d", slot)
                 break
             }
 
             if round%100 == 0 {
-                log.Infof("round %d finished for slot %d", round, slot)
+                log.Infof("scanned %d keys for slot %d", round*batchSize, slot)
             }
         }
     }
-    log.Infof("del keys succeeded")
+    close(rawRowsCh)
+
+
+    readerWg.Wait()
+    log.Infof("all readers finished")
 }
