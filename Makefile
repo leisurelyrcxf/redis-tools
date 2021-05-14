@@ -40,6 +40,9 @@ flushdb:
 find-key:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o find-key ./cmd/findkeys
 
+perf:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o hperf ./cmd/perf
+
 binary: recovery flushdb cleanup
 
 build: deps binary

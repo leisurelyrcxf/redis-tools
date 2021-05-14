@@ -5,3 +5,4 @@ recovery
 flushall
 cleanup
 find-key
+hperf
