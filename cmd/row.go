@@ -135,7 +135,7 @@ func (rs Rows) Keys() []string{
     return keys
 }
 
-func (rs Rows) types(client *redis.Client) error {
+func (rs Rows) Types(client *redis.Client) error {
     p := client.Pipeline()
     for _, row := range rs {
         p.Type(row.K)
@@ -162,7 +162,7 @@ func (rs Rows) MGet(client *redis.Client) error {
         return nil
     }
     if rs[0].T == RedisTypeUnknown {
-        if err := rs.types(client); err != nil {
+        if err := rs.Types(client); err != nil {
             log.Errorf("can't get types: '%v'", err)
             return err
         }
