@@ -20,6 +20,7 @@ func main()  {
     addr := flag.String("addr", "", "addr")
     maxSlotNum := flag.Int("max-slot-num", 0, "max slot number")
     slot := flag.Int("slot", -1, "slot")
+    logLevel := flag.String("log-level", "error", "log level, can be 'panic', 'error', 'fatal', 'warn', 'info'")
 
     flag.Parse()
     if *addr == "" {
@@ -32,10 +33,15 @@ func main()  {
         log.Fatalf("max slot number is 0 && slot == 0")
     }
     if *maxSlotNum != 0 {
-        log.Infof("cleanup all slots[0, %d) of %s", *maxSlotNum, *addr)
+        log.Infof("find key of all slots[0, %d) of %s", *maxSlotNum, *addr)
     } else {
-        log.Infof("cleanup slot %d of %s", *slot, *addr)
+        log.Infof("find key of slot %d of %s", *slot, *addr)
     }
+    lvl, err := log.ParseLevel(*logLevel)
+    if err != nil {
+        log.Fatalf("invalid log level: '%v', err")
+    }
+    log.SetLevel(lvl)
 
     var (
         cli = redis.NewClient(&redis.Options{
