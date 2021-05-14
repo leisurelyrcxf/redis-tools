@@ -8,6 +8,7 @@ import (
     log "github.com/sirupsen/logrus"
     "io"
     "net"
+    "os"
     "strconv"
     "strings"
     "sync"
@@ -101,6 +102,13 @@ func main()  {
         addKeys = func(ks []string) {
             keyMutex.Lock()
             keys = append(keys, ks...)
+            if len(keys) > 1000000 {
+                for _, key := range keys {
+                    println(key)
+                }
+                keyMutex.Unlock()
+                os.Exit(0)
+            }
             keyMutex.Unlock()
         }
     )
