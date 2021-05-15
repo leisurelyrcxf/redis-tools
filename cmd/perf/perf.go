@@ -1,6 +1,7 @@
 package main
 
 import (
+    "ads-recovery/cmd"
     "bufio"
     "context"
     "flag"
@@ -68,15 +69,20 @@ func main() {
             defer wg.Done()
 
             for ctx.Err() == nil {
-                rand.Seed(time.Now().UnixNano())
+                rows := make(cmd.Rows, 500)
 
-                pipe := cli.Pipeline()
-                for i := 0; i < 5000; i++ {
-                    pipe.HGetAll(keys[rand.Intn(len(keys))])
+                rand.Seed(time.Now().UnixNano())
+                for i := 0; i < len(rows); i++ {
+                    rows[i] = &cmd.Row{
+                        K: keys[rand.Intn(len(keys))],
+                        T: cmd.RedisTypeHash,
+                        V: nil,
+                    }
                 }
+
                 start := time.Now()
-                cmds, err := pipe.Exec()
-                successCount, errCount := stats(cmds, err, 5000)
+                _ = rows.MGet(cli)
+                successCount, errCount := rows.Stats()
                 atomic.AddInt64(&totalSucessCount, successCount)
                 atomic.AddInt64(&totalUserSeconds, int64(time.Since(start)/time.Microsecond)*successCount)
                 atomic.AddInt64(&totalErrCount, errCount)
@@ -88,20 +94,6 @@ func main() {
     log.Infof("failed commands: %d", totalErrCount)
     log.Infof("qps: %.2f command/s", float64(totalSucessCount)/float64(*duration/time.Second))
     log.Infof("avg latency: %.2f ms", float64(totalUserSeconds)/float64(totalSucessCount)/1000)
-}
-
-func stats(cmds []redis.Cmder, err error, pipeCount int64) (successCount, errCount int64) {
-    if err != nil {
-        return 0, pipeCount
-    }
-    for _, cmd := range cmds {
-        if cmd.Err() != nil {
-            errCount++
-        } else {
-            successCount++
-        }
-    }
-    return
 }
 
 func loadKeys(keyFileName string) []string {

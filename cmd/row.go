@@ -245,6 +245,17 @@ func (rs Rows) exists(target *redis.Client) error {
     return nil
 }
 
+func (rs Rows) Stats() (successCount, errCount int64) {
+    for _, row := range rs {
+        if row.V == nil {
+            errCount++
+        } else {
+            successCount++
+        }
+    }
+    return successCount, errCount
+}
+
 func parseErr(cmders []redis.Cmder, err error) error {
     if err != nil {
         log.Errorf("pipeline failed: %v", err)
