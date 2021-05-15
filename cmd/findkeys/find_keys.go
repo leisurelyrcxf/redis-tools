@@ -108,7 +108,7 @@ func main()  {
         addKeys = func(ks []string) {
             keyMutex.Lock()
             keys = append(keys, ks...)
-            if len(keys) > 1000000 {
+            if len(keys) > 10000000 {
                 for _, key := range keys {
                     println(key)
                 }
@@ -142,7 +142,7 @@ func main()  {
 
                     hashKeys := make([]string, 0, 10)
                     for _, row := range rows {
-                        if row.T == cmd.RedisTypeHash {
+                        if row.T == cmd.RedisTypeHash && strings.HasPrefix(row.K, "query"){
                             hashKeys = append(hashKeys, row.K)
                         }
                     }
