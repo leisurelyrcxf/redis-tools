@@ -3,12 +3,10 @@ package main
 import (
     "ads-recovery/cmd"
     "flag"
-    "fmt"
     "github.com/go-redis/redis"
     log "github.com/sirupsen/logrus"
     "io"
     "net"
-    "strconv"
     "strings"
     "sync"
     "sync/atomic"
@@ -46,38 +44,6 @@ func main()  {
             PoolSize:50,
             IdleCheckFrequency: time.Second*10,
         })
-
-        scan = func(slot int, cid int, batchSize int) (rows cmd.Rows, newCid int, err error) {
-            result, err := cli.Do([]interface{}{"SLOTSSCAN", slot, cid, "count", batchSize}...).Result()
-            if err != nil {
-                return nil, 0, err
-            }
-            resultArray, ok := result.([]interface{})
-            if !ok {
-                return nil, -1, fmt.Errorf("result type not []interface{}")
-            }
-            if len(resultArray) != 2 {
-                return nil, -1, fmt.Errorf("result not 2 rows")
-            }
-            newCursorString := fmt.Sprintf("%v", resultArray[0])
-            if newCid, err = strconv.Atoi(newCursorString); err != nil {
-                return nil, -1, fmt.Errorf("result '%s' not int", newCursorString)
-            }
-            keysResult, ok := resultArray[1].([]interface{})
-            if !ok {
-                return nil, -1, fmt.Errorf("rows result type not []interface{}")
-            }
-            rows = make([]*cmd.Row, 0, len(keysResult))
-            for _, keyResult := range keysResult {
-                key, ok := keyResult.(string)
-                if !ok {
-                    return nil, -1, fmt.Errorf("key type not sring")
-                }
-                rows = append(rows, &cmd.Row{K: key})
-            }
-
-            return rows, newCid, nil
-        }
     )
 
     const batchSize = 50
@@ -149,7 +115,7 @@ func main()  {
 
             for i :=0; ; i++ {
                 var newCursorID int
-                if rawRows, newCursorID, err = scan(slot, cursorID, batchSize); err != nil {
+                if rawRows, newCursorID, err = cmd.Scan(cli, slot, cursorID, batchSize); err != nil {
                     if i >= maxRetry- 1 {
                         log.Fatalf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
                         return

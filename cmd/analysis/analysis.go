@@ -3,11 +3,12 @@ package main
 import (
     "ads-recovery/cmd"
     "flag"
+    "fmt"
     "github.com/go-redis/redis"
     log "github.com/sirupsen/logrus"
     "io"
     "net"
-    "os"
+    "strconv"
     "strings"
     "sync"
     "sync/atomic"
@@ -17,23 +18,56 @@ import (
 func main()  {
     addr := flag.String("addr", "", "addr")
     maxSlotNum := flag.Int("max-slot-num", 0, "max slot number")
-    slot := flag.Int("slot", -1, "slot")
+    slotsDesc := flag.String("slots",  "-1,-2", "slots")
     logLevel := flag.String("log-level", "error", "log level, can be 'panic', 'error', 'fatal', 'warn', 'info'")
+    batchSize := flag.Int("batch-size", 256, "batch size")
 
     flag.Parse()
+    var slots []int
     if *addr == "" {
         log.Fatalf("source addr not provided")
     }
     if _, _, err := net.SplitHostPort(*addr); err != nil {
         log.Fatalf("source addr not valid: %v", err)
     }
-    if *maxSlotNum == 0 && *slot == -1 {
+    if *maxSlotNum == 0 && *slotsDesc == "" {
         log.Fatalf("max slot number is 0 && slot == 0")
     }
     if *maxSlotNum != 0 {
-        log.Infof("find key of all slots[0, %d) of %s", *maxSlotNum, *addr)
+        for slot := 0; slot < *maxSlotNum; slot++ {
+            slots = append(slots, slot)
+        }
     } else {
-        log.Infof("find key of slot %d of %s", *slot, *addr)
+        if strings.Contains(*slotsDesc, "-") {
+            parts := strings.Split(*slotsDesc, "-")
+            if len(parts) != 2 {
+                log.Fatalf("len(parts) != 2")
+            }
+            first, err := strconv.Atoi(parts[0])
+            if err != nil {
+                log.Fatalf("first invalid: %v", err)
+            }
+            second, err := strconv.Atoi(parts[1])
+            if err != nil {
+                log.Fatalf("second invalid: %v", err)
+            }
+            for i := first; i <= second; i++ {
+                slots = append(slots, i)
+            }
+            if len(slots) == 0 {
+                log.Fatalf("len(slots) == 0")
+            }
+        } else {
+            parts := strings.Split(*slotsDesc, ",")
+            slots = make([]int, len(parts))
+            for idx, part := range parts {
+                slot, err := strconv.Atoi(part)
+                if err != nil {
+                    log.Fatalf("invalid slots: %v", err)
+                }
+                slots[idx] = slot
+            }
+        }
     }
     lvl, err := log.ParseLevel(*logLevel)
     if err != nil {
@@ -51,11 +85,6 @@ func main()  {
             PoolSize:50,
             IdleCheckFrequency: time.Second*10,
         })
-    )
-
-    const batchSize = 50
-
-    var (
         readerWg sync.WaitGroup
         maxBuffered = 10000
         rawRowsCh       = make(chan cmd.Rows, maxBuffered)
@@ -68,21 +97,7 @@ func main()  {
         }
         retryInterval = time.Second * 10
         readerCount = 30
-
-        keys = make([]string, 0, 100000)
-        keyMutex sync.Mutex
-        addKeys = func(ks []string) {
-            keyMutex.Lock()
-            keys = append(keys, ks...)
-            if len(keys) > 10000000 {
-                for _, key := range keys {
-                    println(key)
-                }
-                keyMutex.Unlock()
-                os.Exit(0)
-            }
-            keyMutex.Unlock()
-        }
+        stats = cmd.NewStats()
     )
 
     for i := 0; i < readerCount; i++ {
@@ -93,42 +108,34 @@ func main()  {
 
             for rows := range rawRowsCh {
                 for i := 0; ; i++ {
-                    if err := rows.Types(cli); err != nil {
+                    if err := rows.Card(cli); err != nil {
                         if i >= maxRetry- 1 || !isRetryableErr(err) {
                             atomic.AddInt64(&failedReadBatches, 1)
                             log.Errorf("[Manual] Read failed: %v @round %d, keys: %v", err, i, rows.Keys())
                             break
                         }
-                        log.Warnf("Read failed: '%v' @round %d, retrying in %s...", err, i, retryInterval)
+                        log.Warnf("Card failed: '%v' @round %d, retrying in %s...", err, i, retryInterval)
                         time.Sleep(retryInterval)
                         continue
                     }
-                    tmp := atomic.AddInt64(&successfulReadBatches, 1)
-                    log.Infof("Read %d batches successfully @round %d", tmp, i)
-
-                    hashKeys := make([]string, 0, 10)
-                    for _, row := range rows {
-                        if row.T == cmd.RedisTypeHash && strings.HasPrefix(row.K, "query"){
-                            hashKeys = append(hashKeys, row.K)
-                        }
+                    successfulReadBatches := atomic.AddInt64(&successfulReadBatches, 1)
+                    if successfulReadBatches%1000 == 1 {
+                        log.Warningf("Card %d batches successfully @round %d", successfulReadBatches, i)
+                        fmt.Print(stats.String())
+                    } else {
+                        log.Infof("Card %d batches successfully @round %d", successfulReadBatches, i)
                     }
-                    addKeys(hashKeys)
+                    stats.Collect(rows)
                     break
                 }
             }
         }()
     }
 
-    var slots []int
-    if *maxSlotNum != 0 {
-        for slot := 0; slot < *maxSlotNum; slot++ {
-            slots = append(slots, slot)
-        }
-    } else {
-        slots = append(slots, *slot)
-    }
-
-    var scannedBatches int
+    var (
+        scannedBatches int
+    )
+    log.Infof("Analyze key of slots %v of %s", slots, *addr)
     for _, slot := range slots {
         var cursorID = 0
         for round := 1; ; round++ {
@@ -139,7 +146,7 @@ func main()  {
 
             for i :=0; ; i++ {
                 var newCursorID int
-                if rawRows, newCursorID, err = cmd.Scan(cli, slot, cursorID, batchSize); err != nil {
+                if rawRows, newCursorID, err = cmd.Scan(cli, slot, cursorID, *batchSize); err != nil {
                     if i >= maxRetry- 1 {
                         log.Fatalf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
                         return
@@ -155,12 +162,12 @@ func main()  {
 
             rawRowsCh <- rawRows
             if cursorID == 0 {
-                log.Infof("scanned all keys of slot %d", slot)
+                log.Warningf("scanned all keys of slot %d", slot)
                 break
             }
 
-            if round%100 == 0 {
-                log.Infof("scanned %d keys for slot %d", round*batchSize, slot)
+            if round%1000 == 0 {
+                log.Warningf("scanned %d keys for slot %d", *batchSize*round, slot)
             }
         }
     }
@@ -168,8 +175,9 @@ func main()  {
 
 
     readerWg.Wait()
-    for _, key := range keys {
-        println(key)
-    }
-    log.Infof("all readers finished")
+
+    log.Warningf("----------------------------------------------------------------------------------")
+    log.Warningf("all readers finished")
+    fmt.Print(stats.String())
+    log.Warningf("----------------------------------------------------------------------------------")
 }

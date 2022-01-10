@@ -34,7 +34,7 @@ func main() {
     }
     lvl, err := log.ParseLevel(*logLevel)
     if err != nil {
-        log.Fatalf("invalid log level: '%v', err")
+        log.Fatalf("invalid log level: '%v'", err)
     }
     log.SetLevel(lvl)
     if *threadNum <= 0 {

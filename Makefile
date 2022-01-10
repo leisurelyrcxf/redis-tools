@@ -43,7 +43,10 @@ find-key:
 perf:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o hperf ./cmd/perf
 
-binary: recovery flushdb cleanup
+analysis:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o analysis ./cmd/analysis
+
+binary: recovery flushdb cleanup analysis
 
 build: deps binary
 
