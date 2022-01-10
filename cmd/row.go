@@ -331,7 +331,16 @@ func (rs Rows) Keys() []string{
     return keys
 }
 
-func (rs Rows) Types(client *redis.Client) error {
+func (rs Rows) Types(client *redis.Client) (err error) {
+    if len(rs) == 0 {
+        return nil
+    }
+
+    defer func() {
+        if err != nil {
+            rs[0].T = RedisTypeUnknown
+        }
+    }()
     p := client.Pipeline()
     for _, row := range rs {
         p.Type(row.K)
@@ -344,12 +353,10 @@ func (rs Rows) Types(client *redis.Client) error {
         typeString, err := cmder.(*redis.StatusCmd).Result()
         if err != nil {
             log.Errorf("cmd '%s' failed: %v", cmder.(*redis.StatusCmd).String(), err)
-            rs[0].T = RedisTypeUnknown
             return err
         }
         if rs[idx].T, err = ParseRedisType(typeString); err != nil {
             log.Errorf("type unknown: %v", err)
-            rs[0].T = RedisTypeUnknown
             return err
         }
     }
@@ -487,6 +494,16 @@ func (rs Rows) Stats() (successCount, errCount int64) {
         }
     }
     return successCount, errCount
+}
+
+func (rs Rows) Filter(filter func(*Row)bool) Rows {
+    ret := make(Rows, 0, len(rs))
+    for _, r := range rs {
+        if filter(r) {
+            ret = append(ret, r)
+        }
+    }
+    return ret
 }
 
 func parseErr(cmders []redis.Cmder, err error) (resultErr error) {

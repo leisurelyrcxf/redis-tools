@@ -107,6 +107,14 @@ func main()  {
             defer readerWg.Done()
 
             for rows := range rawRowsCh {
+                if err := rows.Types(cli); err == nil {
+                    rows = rows.Filter(func(row *cmd.Row) bool {
+                        return row.T != cmd.RedisTypeString
+                    })
+                }
+                if len(rows) == 0 {
+                    continue
+                }
                 for i := 0; ; i++ {
                     if err := rows.Card(cli); err != nil {
                         if i >= maxRetry- 1 || !isRetryableErr(err) {
