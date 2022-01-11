@@ -1,12 +1,13 @@
 package main
 
 import (
-    "redis-tools/cmd"
     "flag"
-    "github.com/go-redis/redis"
-    log "github.com/sirupsen/logrus"
     "net"
     "time"
+
+    "github.com/go-redis/redis"
+    "github.com/leisurelyrcxf/redis-tools/cmd"
+    log "github.com/sirupsen/logrus"
 )
 
 func main()  {

@@ -2,14 +2,15 @@ package cmd
 
 import (
     "fmt"
-    "github.com/go-redis/redis"
-    log "github.com/sirupsen/logrus"
     "math"
     "strconv"
     "strings"
     "sync"
     "sync/atomic"
     "time"
+
+    "github.com/go-redis/redis"
+    log "github.com/sirupsen/logrus"
 )
 
 var DefaultExpire time.Duration = 0

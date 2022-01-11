@@ -1,11 +1,8 @@
 package main
 
 import (
-    "redis-tools/cmd"
     "flag"
     "fmt"
-    "github.com/go-redis/redis"
-    log "github.com/sirupsen/logrus"
     "io"
     "net"
     "strconv"
@@ -13,6 +10,10 @@ import (
     "sync"
     "sync/atomic"
     "time"
+
+    "github.com/go-redis/redis"
+    "github.com/leisurelyrcxf/redis-tools/cmd"
+    log "github.com/sirupsen/logrus"
 )
 
 const (

@@ -1,12 +1,9 @@
 package main
 
 import (
-    "redis-tools/cmd"
     "bufio"
     "context"
     "flag"
-    "github.com/go-redis/redis"
-    log "github.com/sirupsen/logrus"
     "io"
     "math/rand"
     "net"
@@ -15,6 +12,10 @@ import (
     "sync"
     "sync/atomic"
     "time"
+
+    "github.com/go-redis/redis"
+    "github.com/leisurelyrcxf/redis-tools/cmd"
+    log "github.com/sirupsen/logrus"
 )
 
 func main() {
