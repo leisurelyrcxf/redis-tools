@@ -1,7 +1,7 @@
 package main
 
 import (
-    "ads-recovery/cmd"
+    "redis-tools/cmd"
     "flag"
     "github.com/go-redis/redis"
     log "github.com/sirupsen/logrus"

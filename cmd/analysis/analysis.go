@@ -1,7 +1,7 @@
 package main
 
 import (
-    "ads-recovery/cmd"
+    "redis-tools/cmd"
     "flag"
     "fmt"
     "github.com/go-redis/redis"

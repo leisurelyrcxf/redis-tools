@@ -1,7 +1,7 @@
 package main
 
 import (
-    "ads-recovery/cmd"
+    "redis-tools/cmd"
     "bufio"
     "context"
     "flag"
