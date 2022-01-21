@@ -46,7 +46,10 @@ perf:
 analysis:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o analysis ./cmd/analysis
 
-binary: recovery flushdb cleanup analysis
+fill-redis:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o fill-redis ./cmd/fill
+
+binary: recovery flushdb cleanup analysis fill-redis
 
 build: deps binary
 
