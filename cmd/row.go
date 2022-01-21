@@ -2,6 +2,7 @@ package cmd
 
 import (
     "fmt"
+    "github.com/golang/glog"
     "math"
     "strconv"
     "strings"
@@ -73,6 +74,15 @@ func ParseRedisType(typeStr string) (RedisType, error) {
         }
     }
     return RedisTypeUnknown, fmt.Errorf("unknown redis type '%s'", typeStr)
+}
+
+func MustParseRedisType(typeStr string) RedisType {
+    typ, err := ParseRedisType(typeStr)
+    if err != nil {
+        glog.Fatalf("parse redis type failed: '%s'", typeStr)
+        return RedisTypeUnknown
+    }
+    return typ
 }
 
 
@@ -394,6 +404,21 @@ func (rs Rows) MGet(client *redis.Client) error {
     return nil
 }
 
+func (rs Rows) MGetWithRetry(client *redis.Client, maxRetry int) error {
+    for i := 1; ; i++ {
+        if err := rs.MGet( client); err != nil {
+            if i >= maxRetry {
+                glog.Errorf("MGet failed: '%v' after retried for %d times", err, maxRetry)
+                return err
+            }
+            glog.V(11).Infof("MGet failed: '%v', retry in 1s...", err)
+            time.Sleep(time.Second)
+            continue
+        }
+        return nil
+    }
+}
+
 func (rs Rows) MSet(target *redis.Client, notLogExistedKeys bool) error {
     if len(rs) == 0 {
         return nil
@@ -421,6 +446,21 @@ func (rs Rows) MSet(target *redis.Client, notLogExistedKeys bool) error {
     }
     cmders, cmdErr := p.Exec()
     return parseErr(cmders, cmdErr)
+}
+
+func (rs Rows) MSetWithRetry(client *redis.Client, notLogExistedKeys bool, maxRetry int) error {
+    for i := 1; ; i++ {
+        if err := rs.MSet(client, notLogExistedKeys); err != nil {
+            if i >= maxRetry {
+                glog.Errorf("MSet failed: '%v' after retried for %d times", err, maxRetry)
+                return err
+            }
+            glog.V(11).Infof("MSet failed: '%v', retry in 1s...", err)
+            time.Sleep(time.Second)
+            continue
+        }
+        return nil
+    }
 }
 
 func (rs Rows) Delete(target *redis.Client) error {
