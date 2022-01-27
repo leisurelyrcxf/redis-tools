@@ -237,6 +237,7 @@ func getCurrentDBSize(serverAddr string) (int64, error) {
 
 func fillRedis(
 	ctx context.Context,
+	dbId int,
 	serverAddr string, password string,
 	threadNum int, redisType cmd.RedisType,
 	lowKey, highKey int64,
@@ -330,7 +331,7 @@ func fillRedis(
 	var rdb = redis.NewClient(&redis.Options{
 		Addr:         serverAddr,
 		Password:     password, // no password set
-		DB:           0,        // use default DB
+		DB:           dbId,     // use default DB
 		DialTimeout:  60 * time.Second,
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 60 * time.Second,
@@ -391,6 +392,7 @@ func Version() string {
 }
 
 func main() {
+	dbId := flag.Int("db", 0, "db id")
 	dbSizeStr := flag.String("db-size", "128mb", "db size")
 	valueSize := flag.Int("value-size", defaultValueSize, "value size")
 	overHeadSize := flag.Int("overhead-size", defaultOverheadSize, "overhead size ")
@@ -456,7 +458,7 @@ func main() {
 		os.Exit(1)
 		return
 	}
-	errCount := fillRedis(ctx, fmt.Sprintf("%s:%d", *host, *port), *password, *threadNum, cmd.MustParseRedisType(*dataType),
+	errCount := fillRedis(ctx, *dbId, fmt.Sprintf("%s:%d", *host, *port), *password, *threadNum, cmd.MustParseRedisType(*dataType),
 		*startKey, *maxKey, *pipelineSize, *valueSize, dbSize, memtier, !*dontStopWhenFailed)
 	glog.Flush()
 	fmt.Printf("\nError Count in total: %d\n", errCount)
