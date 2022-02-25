@@ -299,7 +299,7 @@ func (r *Row) Set(p redis.Pipeliner) {
 func (r *Row) XCard(p redis.Pipeliner) {
     switch r.T {
     case RedisTypeString:
-        p.Exists(r.K) // If you skip this, then needs special handling in Rows::Card
+        p.StrLen(r.K) // If you skip this, then needs special handling in Rows::Card
     case RedisTypeList:
         p.LLen(r.K)
     case RedisTypeHash:
