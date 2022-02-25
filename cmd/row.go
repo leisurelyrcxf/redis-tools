@@ -184,16 +184,13 @@ func (ess *Stats) String() string {
     sb.WriteString("-------------------------------------------------------------------\n")
     sb.WriteString("Stats:\n")
     ess.ForEachType(func(redisType RedisType, stat *Stat) {
-        if redisType == RedisTypeString {
-            return
-        }
         if math.IsNaN(stat.AvgCard) {
             if stat.MaxCard.Get() != 0 {
                 panic("stat.AvgCard.IsNaN() && stat.MaxCard != 0")
             }
             return
         }
-        sb.WriteString(fmt.Sprintf("    %s: avg_card: %.1f, max_card: %d, max_card_key: %s\n", redisType, stat.AvgCard, stat.MaxCard.Get(), stat.MaxCardKey))
+        sb.WriteString(fmt.Sprintf("    %s: avg_card: %.1f, max_card: %d, max_card_key: %s, key_count: %d\n", redisType, stat.AvgCard, stat.MaxCard.Get(), stat.MaxCardKey, stat.KeyCount.Get()))
     })
     sb.WriteString("-------------------------------------------------------------------\n")
     return sb.String()
