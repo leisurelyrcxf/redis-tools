@@ -298,7 +298,7 @@ func fillRedis(
 		}
 
 	LoopTasks:
-		for curKey := lowKey; curKey < highKey && currentDBSize < maxDBSize; curKey += int64(taskSize) {
+		for curKey := lowKey; curKey <= highKey && currentDBSize < maxDBSize; curKey += int64(taskSize) {
 			task := NewTask(redisType, curKey, minInt64(curKey+int64(taskSize), highKey), valueSize, memtier)
 			for {
 				select {
@@ -310,6 +310,7 @@ func fillRedis(
 				}
 			}
 		}
+		glog.Infof("finished scheduled")
 		close(taskCh)
 
 		for flyingTasks.Len() > 0 {
@@ -318,6 +319,7 @@ func fillRedis(
 				updateFlyingTasks(finishedTask)
 			}
 		}
+		glog.Infof("flying tasks cleared")
 
 		if currentDBSize < maxDBSize {
 			if writtenUntil != highKey {
@@ -336,7 +338,7 @@ func fillRedis(
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  60 * time.Second,
-		PoolSize:     threadNum,
+		PoolSize:     int(float64(threadNum) * 1.2),
 		MinIdleConns: threadNum,
 	})
 
@@ -402,7 +404,7 @@ func main() {
 	host := flag.String("host", "localhost", "redis host")
 	port := flag.Int("port", 6379, "redis port")
 	password := flag.String("password", "", "redis password")
-	threadNum := flag.Int("thread-num", 8, "thread num")
+	threadNum := flag.Int("thread-num", 50, "thread num")
 	timeout := flag.Duration("timeout", 7*24*time.Hour, "timeout")
 	startKey := flag.Int64("start-key", 0, "start key")
 	maxKey := flag.Int64("max-key", math.MaxInt64, "max key")
