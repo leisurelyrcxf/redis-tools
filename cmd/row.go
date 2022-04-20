@@ -5,6 +5,7 @@ import (
     "github.com/golang/glog"
     "io"
     "math"
+    "reflect"
     "strconv"
     "strings"
     "sync"
@@ -34,6 +35,46 @@ var RedisTypes = []RedisType{
     RedisTypeHash,
     RedisTypeSet,
     RedisTypeZset,
+}
+
+type Pipeline struct {
+    *redis.Pipeline
+
+    cap int
+    cli *redis.Client
+}
+
+func NewPipeline(cli *redis.Client, cap int) *Pipeline {
+    return &Pipeline{
+        Pipeline: cli.Pipeline().(*redis.Pipeline),
+        cap:      cap,
+        cli:      cli,
+    }
+}
+
+func (p *Pipeline) Size() int {
+    if p.Pipeline == nil {
+        return 0
+    }
+    v := reflect.ValueOf(p.Pipeline)
+    y := v.FieldByName("cmds")
+    return len(y.Interface().([]redis.Cmder))
+}
+
+func (p *Pipeline) TryExec() error {
+    if p.Size() < p.cap {
+        return nil
+    }
+
+    err := p.Exec()
+    p.Pipeline = p.cli.Pipeline().(*redis.Pipeline)
+    return err
+}
+
+func (p *Pipeline) Exec() error {
+    err := parseErr(p.Pipeline.Exec())
+    p.Pipeline = nil
+    return err
 }
 
 func Scan(cli *redis.Client, slot int, cursorId int, batchSize int, typ RedisType, overwriteExistedKeys bool) (rows Rows, newCid int, err error) {
@@ -367,46 +408,58 @@ func (r *Row) CalcDiff(val interface{}) Diff {
     return nil
 }
 
-func (r *Row) Set(p redis.Pipeliner) {
+func (r *Row) Set(p *Pipeline) error {
     switch r.T {
     case RedisTypeString:
         p.SetNX(r.K, r.V, DefaultExpire) // TODO check this.
+        return nil
     case RedisTypeList:
         for _ ,v := range r.V.([]string) {
             p.RPush(r.K, v)
+            if err := p.TryExec(); err != nil {
+                return err
+            }
         }
         if DefaultExpire > 0 {
             p.Expire(r.K, DefaultExpire)
         }
+        return nil
     case RedisTypeHash:
-        valueMap := make(map[string]interface{})
-        for k ,v := range r.V.(map[string]string) {
-            valueMap[k] = v
+        for k, v := range r.V.(map[string]string) {
+            p.HSet(r.K, k, v)
+            if err := p.TryExec(); err != nil {
+                return err
+            }
         }
-        if len(valueMap) == 0 {
-            log.Panicf("len(valueMap) == 0 for key %v(%v)", r.K, r.T)
-        }
-        p.HMSet(r.K, valueMap)
         if DefaultExpire > 0 {
             p.Expire(r.K, DefaultExpire)
         }
+        return nil
     case RedisTypeSet:
-        values := make([]interface{}, len(r.V.([]string)))
-        for idx, v := range r.V.([]string) {
-            values[idx] = v
+        for _, v := range r.V.([]string) {
+            p.SAdd(r.K, v)
+            if err := p.TryExec(); err != nil {
+                return err
+            }
         }
-        p.SAdd(r.K, values...)
         if DefaultExpire > 0 {
             p.Expire(r.K, DefaultExpire)
         }
+        return nil
     case RedisTypeZset:
         if len(r.V.([]redis.Z)) == 0 {
             log.Panicf("len(r.V.([]redis.Z)) == 0 for key %v(%v)", r.K, r.T)
         }
-        p.ZAddNX(r.K, r.V.([]redis.Z)...)
+        for _, z :=  range r.V.([]redis.Z) {
+            p.ZAddNX(r.K, z)
+            if err := p.TryExec(); err != nil {
+                return err
+            }
+        }
         if DefaultExpire > 0 {
             p.Expire(r.K, DefaultExpire)
         }
+        return nil
     default:
         panic(fmt.Sprintf("unknown redis type %s", r.T))
     }
@@ -582,7 +635,7 @@ func (rs Rows) MSet(target *redis.Client, notLogExistedKeys bool) error {
         }
     }
 
-    p := target.Pipeline()
+    p := NewPipeline(target, len(rs))
     for _, row := range rs {
         if row.OverwriteExistedKeys || row.TargetNotExists {
             if row.V == nil {
@@ -590,14 +643,15 @@ func (rs Rows) MSet(target *redis.Client, notLogExistedKeys bool) error {
             } else if row.IsValueEmpty() {
                 log.Warnf("skip empty value of key %s, type: %v", row.K, row.T)
             } else {
-                row.Set(p)
+                if err := row.Set(p); err != nil {
+                    return err
+                }
             }
         } else if !notLogExistedKeys {
             log.Warnf("skip existed key %s", row.K)
         }
     }
-    cmders, cmdErr := p.Exec()
-    return parseErr(cmders, cmdErr)
+    return p.Exec()
 }
 
 func (rs Rows) MSetWithRetry(client *redis.Client, notLogExistedKeys bool, maxRetry int) error {
