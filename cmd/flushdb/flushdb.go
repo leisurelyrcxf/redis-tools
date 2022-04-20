@@ -67,7 +67,8 @@ func main()  {
                     atomic.AddInt64(&failedWriteBatches, 1)
                     log.Fatalf("[Manual] Read failed: %v @round %d, keys: %v", err, i, rows.Keys())
                 } else {
-                    log.Infof("Read %d batches successfully @round %d", atomic.AddInt64(&successfulWriteBatches, 1), i)
+                    tmp := atomic.AddInt64(&successfulWriteBatches, 1)
+                    log.Infof("Read %d batches successfully @round %d", tmp, i)
                 }
             }
         }()

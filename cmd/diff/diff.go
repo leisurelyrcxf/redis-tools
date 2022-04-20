@@ -2,13 +2,8 @@ package main
 
 import (
     "flag"
-    "fmt"
-    "io"
     "net"
     "os"
-    "strings"
-    "sync"
-    "sync/atomic"
     "time"
 
     "github.com/go-redis/redis"
@@ -73,90 +68,32 @@ func main()  {
             PoolSize: 50,
             IdleCheckFrequency: time.Second*10,
         })
+    )
 
-        isRetryableErr = func(err error) bool {
-            return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
+    w, err := os.Create("compare-result")
+    if err != nil {
+        panic(err)
+    }
+
+    var (
+        input  = make(chan cmd.Rows, *maxBuffered)
+    )
+    scannedBatches := cmd.ScanSlots(srcClient, slots, *batchSize, maxRetry, retryInterval, input)
+    var successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches int64
+    output := cmd.RedisDiff(input, *readerCount, *writerCount, srcClient, targetClient, *maxBuffered, maxRetry, retryInterval,
+        &successfulReadBatches, &failedReadBatches, &successfulWriteBatches, &failedWriteBatches)
+
+    for rows := range output {
+        for _, row := range rows {
+            if err := row.D.Output(w); err != nil {
+                log.Fatalf("Output error: %v", err)
+            }
+            if _, err = w.Write([]byte{'\n'}); err != nil {
+                log.Fatalf("Write error: %v", err)
+            }
         }
-    )
-
-
-    var (
-        readerWg sync.WaitGroup
-
-        rawRowsCh       = make(chan cmd.Rows, *maxBuffered)
-        rowsWithValueCh = make(chan cmd.Rows, *maxBuffered)
-
-        successfulReadBatches,  failedReadBatches int64
-    )
-
-    for i := 0; i < *readerCount; i++ {
-        readerWg.Add(1)
-
-        go func() {
-            defer readerWg.Done()
-
-            for rows := range rawRowsCh {
-                if err := utils.ExecWithRetry(func() error {
-                    return rows.MCard(srcClient)
-                }, maxRetry, retryInterval, isRetryableErr); err != nil {
-                    atomic.AddInt64(&failedReadBatches, 1)
-                    log.Fatalf("[Manual] Read failed: %v, keys: %v", err, rows.Keys())
-                } else {
-                    rowsWithValueCh <- rows
-                    log.Infof("Read %d batches successfully", atomic.AddInt64(&successfulReadBatches, 1))
-                }
-            }
-        }()
     }
 
-    go func() {
-        readerWg.Wait()
-        log.Infof("all readers finished, close rowsWithValueCh")
-        close(rowsWithValueCh)
-    }()
-
-    var (
-        writerWg               sync.WaitGroup
-        successfulWriteBatches, failedWriteBatches int64
-    )
-    for i := 0; i < *writerCount; i++ {
-        writerWg.Add(1)
-
-        go func(i int) {
-            defer writerWg.Done()
-
-            w, err := os.Create(fmt.Sprintf("comparator-%d", i))
-            if err != nil {
-                panic(err)
-            }
-            for rows := range rowsWithValueCh {
-                if err := utils.ExecWithRetry(func() error {
-                    return rows.MDiff(targetClient)
-                }, maxRetry, retryInterval, isRetryableErr); err != nil {
-                    atomic.AddInt64(&failedWriteBatches, 1)
-                    log.Fatalf("[Manual] Write failed: '%v' keys: %v", err, rows.Keys())
-                } else {
-                    log.Infof("Compare %d batches successfully %d ", atomic.AddInt64(&successfulWriteBatches, 1))
-                    for _, row := range rows {
-                        if row.D != nil {
-                            if err := row.D.Output(w); err != nil {
-                                log.Fatalf("Output error: %v", err)
-                            }
-                            if _, err = w.Write([]byte{'\n'}); err != nil {
-                                log.Fatalf("Write error: %v", err)
-                            }
-                        }
-                    }
-                }
-            }
-            _ = w.Close()
-        }(i)
-    }
-
-    scannedBatches := cmd.ScanSlots(srcClient, slots, *batchSize, maxRetry, retryInterval, rawRowsCh)
-
-    readerWg.Wait()
-    writerWg.Wait()
     if failedReadBatches == 0 && failedWriteBatches == 0 {
         log.Infof("migration succeeded")
     } else {

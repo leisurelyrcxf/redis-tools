@@ -3,6 +3,7 @@ package cmd
 import (
     "fmt"
     "github.com/golang/glog"
+    "github.com/leisurelyrcxf/redis-tools/cmd/utils"
     "io"
     "math"
     "reflect"
@@ -57,8 +58,9 @@ func (p *Pipeline) Size() int {
         return 0
     }
     v := reflect.ValueOf(p.Pipeline)
-    y := v.FieldByName("cmds")
-    return len(y.Interface().([]redis.Cmder))
+    y := v.Elem().FieldByName("cmds")
+    l := y.Len()
+    return l
 }
 
 func (p *Pipeline) TryExec() error {
@@ -122,6 +124,10 @@ func ScanSlotsRaw(cli *redis.Client, slots []int, typ RedisType, overwriteExiste
     var (
         scannedBatches int64
     )
+    defer func() {
+        close(rawRowsCh)
+    }()
+
     for _, slot := range slots {
         var cursorID = 0
         for round := 1; ; round++ {
@@ -134,7 +140,7 @@ func ScanSlotsRaw(cli *redis.Client, slots []int, typ RedisType, overwriteExiste
                 var newCursorID int
                 if rawRows, newCursorID, err = Scan(cli, slot, cursorID, batchSize, typ, overwriteExistedKeys); err != nil {
                     if i >= maxRetry- 1 {
-                        log.Fatalf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
+                        log.Errorf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
                         return 0
                     }
                     log.Errorf("scan cursor %d failed: '%v' @round %d, retrying in %s...", cursorID, err, i, retryInterval)
@@ -142,11 +148,14 @@ func ScanSlotsRaw(cli *redis.Client, slots []int, typ RedisType, overwriteExiste
                     continue
                 }
                 cursorID = newCursorID
-                scannedBatches++
                 break
             }
 
-            rawRowsCh <- rawRows
+            if len(rawRows) > 0 {
+                rawRowsCh <- rawRows
+                scannedBatches++
+            }
+            
             if cursorID == 0 {
                 break
             }
@@ -157,8 +166,6 @@ func ScanSlotsRaw(cli *redis.Client, slots []int, typ RedisType, overwriteExiste
         }
         log.Warningf("Scanned slot %d", slot)
     }
-    close(rawRowsCh)
-
     return scannedBatches
 }
 
@@ -624,7 +631,7 @@ func (rs Rows) MGetWithRetry(client *redis.Client, maxRetry int) error {
     }
 }
 
-func (rs Rows) MSet(target *redis.Client, notLogExistedKeys bool) error {
+func (rs Rows) MSet(target *redis.Client, pipelineCap int, logExistedKey bool) error {
     if len(rs) == 0 {
         return nil
     }
@@ -635,7 +642,7 @@ func (rs Rows) MSet(target *redis.Client, notLogExistedKeys bool) error {
         }
     }
 
-    p := NewPipeline(target, len(rs))
+    p := NewPipeline(target, pipelineCap)
     for _, row := range rs {
         if row.OverwriteExistedKeys || row.TargetNotExists {
             if row.V == nil {
@@ -647,16 +654,16 @@ func (rs Rows) MSet(target *redis.Client, notLogExistedKeys bool) error {
                     return err
                 }
             }
-        } else if !notLogExistedKeys {
+        } else if logExistedKey {
             log.Warnf("skip existed key %s", row.K)
         }
     }
     return p.Exec()
 }
 
-func (rs Rows) MSetWithRetry(client *redis.Client, notLogExistedKeys bool, maxRetry int) error {
+func (rs Rows) MSetWithRetry(client *redis.Client, pipeCap int, notLogExistedKeys bool, maxRetry int) error {
     for i := 1; ; i++ {
-        if err := rs.MSet(client, notLogExistedKeys); err != nil {
+        if err := rs.MSet(client, pipeCap, notLogExistedKeys); err != nil {
             if i >= maxRetry {
                 glog.Errorf("MSet failed: '%v' after retried for %d times", err, maxRetry)
                 return err
@@ -784,4 +791,80 @@ func parseErr(cmders []redis.Cmder, err error) (resultErr error) {
         }
     }
     return nil
+}
+
+func RedisDiff(input <-chan Rows, readerCount, writerCount int,
+    srcClient *redis.Client, targetClient *redis.Client,
+    maxBuffered int, maxRetry int, retryInterval time.Duration,
+    successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches *int64) (output chan Rows) {
+    output = make(chan Rows)
+    var (
+        readerWg sync.WaitGroup
+        rowsRead  = make(chan Rows, maxBuffered)
+        isRetryableErr = func(err error) bool {
+            return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
+        }
+    )
+
+    for i := 0; i < readerCount; i++ {
+        readerWg.Add(1)
+
+        go func() {
+            defer readerWg.Done()
+
+            for rows := range input {
+                if err := utils.ExecWithRetry(func() error {
+                    return rows.MCard(srcClient)
+                }, maxRetry, retryInterval, isRetryableErr); err != nil {
+                    atomic.AddInt64(failedReadBatches, 1)
+                    log.Errorf("[Manual] Read failed: %v, keys: %v", err, rows.Keys())
+                } else {
+                    rowsRead <- rows
+                    tmp := atomic.AddInt64(successfulReadBatches, 1)
+                    log.Infof("Read %d batches successfully", tmp)
+                }
+            }
+        }()
+    }
+
+    go func() {
+        readerWg.Wait()
+        log.Infof("all readers finished, close rowsRead")
+        close(rowsRead)
+    }()
+
+    var (
+        writerWg               sync.WaitGroup
+    )
+    for i := 0; i < writerCount; i++ {
+        writerWg.Add(1)
+
+        go func(i int) {
+            defer writerWg.Done()
+
+            for rows := range rowsRead {
+                if err := utils.ExecWithRetry(func() error {
+                    return rows.MDiff(targetClient)
+                }, maxRetry, retryInterval, isRetryableErr); err != nil {
+                    atomic.AddInt64(failedWriteBatches, 1)
+                    log.Errorf("[Manual] Write failed: '%v' keys: %v", err, rows.Keys())
+                } else {
+                    tmp := atomic.AddInt64(successfulWriteBatches, 1)
+                    log.Infof("Compare %d batches successfully %d", tmp)
+                    if rows = rows.Filter(func(row *Row) bool {
+                        return row.D != nil
+                    }); len(rows) > 0 {
+                        output <-rows
+                    }
+                }
+            }
+        }(i)
+    }
+
+    go func() {
+        writerWg.Wait()
+        log.Infof("all comparator finished, close rowsRead")
+        close(output)
+    }()
+    return output
 }

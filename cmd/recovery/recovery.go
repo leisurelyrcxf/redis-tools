@@ -36,6 +36,7 @@ func main()  {
     maxBuffered := flag.Int("max-buffered", 1024, "max buffered batch size")
 
     flag.Parse()
+    var slots = utils.ParseSlots(*maxSlotNum, *slotsDesc)
     if *expire > 0 {
         cmd.DefaultExpire = *expire
     }
@@ -79,77 +80,18 @@ func main()  {
             PoolSize: 50,
             IdleCheckFrequency: time.Second*10,
         })
-
-        isRetryableErr = func(err error) bool {
-            return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
-        }
     )
 
 
     var (
-        readerWg sync.WaitGroup
-
-        rawRowsCh       = make(chan cmd.Rows, *maxBuffered)
-        rowsWithValueCh = make(chan cmd.Rows, *maxBuffered)
-
-        successfulReadBatches,  failedReadBatches int64
+        input  = make(chan cmd.Rows, *maxBuffered)
     )
-
-    for i := 0; i < *readerCount; i++ {
-        readerWg.Add(1)
-
-        go func() {
-            defer readerWg.Done()
-
-            for rows := range rawRowsCh {
-                if err := utils.ExecWithRetry(func() error {
-                    return rows.MGet(srcClient)
-                }, maxRetry, retryInterval, isRetryableErr); err != nil {
-                    atomic.AddInt64(&failedReadBatches, 1)
-                    log.Errorf("[Manual] Read failed: %v, keys: %v", err, rows.Keys())
-                } else {
-                    rowsWithValueCh <- rows
-                    log.Infof("Read %d batches successfully", atomic.AddInt64(&successfulReadBatches, 1))
-                }
-            }
-        }()
-    }
-
-    go func() {
-        readerWg.Wait()
-        log.Infof("all readers finished, close rowsWithValueCh")
-        close(rowsWithValueCh)
-    }()
-
-    var (
-        writerWg               sync.WaitGroup
-        successfulWriteBatches, failedWriteBatches int64
-    )
-    for i := 0; i < *writerCount; i++ {
-        writerWg.Add(1)
-
-        go func() {
-            defer writerWg.Done()
-
-            for rows := range rowsWithValueCh {
-                if err := utils.ExecWithRetry(func() error {
-                    return rows.MSet(targetClient, *notLogExistedKeys)
-                }, maxRetry, retryInterval, isRetryableErr); err != nil {
-                    atomic.AddInt64(&failedReadBatches, 1)
-                    log.Errorf("[Manual] Write failed: '%v', keys: %v", err, rows.Keys())
-                } else {
-                    log.Infof("Written %d batches successfully", atomic.AddInt64(&successfulWriteBatches, 1))
-                }
-            }
-        }()
-    }
-
-
-    var slots = utils.ParseSlots(*maxSlotNum, *slotsDesc)
-    scannedBatches := cmd.ScanSlotsRaw(srcClient, slots, redisType, *overwriteExistedKeys, *batchSize, maxRetry, retryInterval, rawRowsCh)
-
-    readerWg.Wait()
-    writerWg.Wait()
+    cmd.ScanSlotsRaw(srcClient, slots, redisType, *overwriteExistedKeys, *batchSize, maxRetry, retryInterval, input)
+    var successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches int64
+    diffCh := cmd.RedisDiff(input, *readerCount, *writerCount, srcClient, targetClient, *maxBuffered, maxRetry, retryInterval,
+        &successfulReadBatches, &failedReadBatches, &successfulWriteBatches, &failedWriteBatches)
+    _, failedReadBatches, _, failedWriteBatches =
+         migrate(diffCh, *readerCount, *writerCount, srcClient, targetClient, *maxBuffered, *batchSize, !*notLogExistedKeys)
     if failedReadBatches == 0 && failedWriteBatches == 0 {
         log.Infof("migration succeeded")
     } else {
@@ -160,16 +102,68 @@ func main()  {
             log.Errorf("%d write batches failed", failedWriteBatches)
         }
     }
-    if failedReadBatches + successfulReadBatches != scannedBatches && failedWriteBatches + successfulWriteBatches != successfulReadBatches{
-        log.Fatalf("failedReadBatches(%d) + successfulReadBatches(%d) != scannedBatches(%d) && failedWriteBatches(%d) + successfulWriteBatches(%d) != successfulReadBatches(%d)",
-            failedReadBatches, successfulReadBatches, scannedBatches, failedWriteBatches, successfulWriteBatches, successfulReadBatches)
+}
+
+func migrate(input <-chan cmd.Rows, readerCount, writerCount int,
+    srcClient *redis.Client, targetClient *redis.Client,
+    maxBuffered int, pipeCap int, logExistedKeys bool) (successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches int64) {
+    var (
+        readerWg sync.WaitGroup
+        rowsRead = make(chan cmd.Rows, maxBuffered)
+        isRetryableErr = func(err error) bool {
+            return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
+        }
+    )
+
+    for i := 0; i < readerCount; i++ {
+        readerWg.Add(1)
+
+        go func() {
+            defer readerWg.Done()
+
+            for rows := range input {
+                if err := utils.ExecWithRetry(func() error {
+                    return rows.MGet(srcClient)
+                }, maxRetry, retryInterval, isRetryableErr); err != nil {
+                    atomic.AddInt64(&failedReadBatches, 1)
+                    log.Errorf("[Manual] Read failed: %v, keys: %v", err, rows.Keys())
+                } else {
+                    rowsRead <- rows
+                    tmp := atomic.AddInt64(&successfulReadBatches, 1)
+                    log.Infof("Read %d batches successfully", tmp)
+                }
+            }
+        }()
     }
-    if failedReadBatches + successfulReadBatches != scannedBatches {
-        log.Fatalf("failedReadBatches(%d) + successfulReadBatches(%d) != scannedBatches(%d)",
-            failedReadBatches, successfulReadBatches, scannedBatches)
+
+    go func() {
+        readerWg.Wait()
+        log.Infof("all readers finished, close rowsRead")
+        close(rowsRead)
+    }()
+
+    var (
+        writerWg               sync.WaitGroup
+    )
+    for i := 0; i < writerCount; i++ {
+        writerWg.Add(1)
+
+        go func() {
+            defer writerWg.Done()
+
+            for rows := range rowsRead {
+                if err := utils.ExecWithRetry(func() error {
+                    return rows.MSet(targetClient, pipeCap, logExistedKeys)
+                }, maxRetry, retryInterval, isRetryableErr); err != nil {
+                    atomic.AddInt64(&failedWriteBatches, 1)
+                    log.Errorf("[Manual] Write failed: '%v', keys: %v", err, rows.Keys())
+                } else {
+                    tmp := atomic.AddInt64(&successfulWriteBatches, 1)
+                    log.Infof("Written %d batches successfully", tmp)
+                }
+            }
+        }()
     }
-    if failedWriteBatches + successfulWriteBatches != successfulReadBatches{
-        log.Fatalf("failedWriteBatches(%d) + successfulWriteBatches(%d) != successfulReadBatches(%d)",
-            failedWriteBatches, successfulWriteBatches, successfulReadBatches)
-    }
+    writerWg.Wait()
+    return successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches
 }
