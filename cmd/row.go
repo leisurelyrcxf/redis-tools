@@ -3,6 +3,7 @@ package cmd
 import (
     "fmt"
     "github.com/golang/glog"
+    "io"
     "math"
     "strconv"
     "strings"
@@ -35,8 +36,8 @@ var RedisTypes = []RedisType{
     RedisTypeZset,
 }
 
-func Scan(cli *redis.Client, slot int, cid int, batchSize int) (rows Rows, newCid int, err error) {
-    result, err := cli.Do([]interface{}{"SLOTSSCAN", slot, cid, "count", batchSize}...).Result()
+func Scan(cli *redis.Client, slot int, cursorId int, batchSize int, typ RedisType, overwriteExistedKeys bool) (rows Rows, newCid int, err error) {
+    result, err := cli.Do([]interface{}{"SLOTSSCAN", slot, cursorId, "count", batchSize}...).Result()
     if err != nil {
         return nil, 0, err
     }
@@ -61,10 +62,63 @@ func Scan(cli *redis.Client, slot int, cid int, batchSize int) (rows Rows, newCi
         if !ok {
             return nil, -1, fmt.Errorf("key type not sring")
         }
-        rows = append(rows, &Row{K: key})
+        rows = append(rows, &Row{K: key, T: typ, OverwriteExistedKeys: overwriteExistedKeys})
     }
 
     return rows, newCid, nil
+}
+
+func ScanSlots(cli *redis.Client, slots []int,
+    batchSize, maxRetry int, retryInterval time.Duration, rawRowsCh chan <-Rows) int64 {
+    return ScanSlotsRaw(cli, slots, RedisTypeUnknown, false, batchSize, maxRetry, retryInterval, rawRowsCh)
+}
+
+func ScanSlotsRaw(cli *redis.Client, slots []int, typ RedisType, overwriteExistedKeys bool,
+    batchSize, maxRetry int, retryInterval time.Duration, rawRowsCh chan <-Rows) int64 {
+    log.Infof("Scan slots: %v\n" +
+        "Data type: '%s'\n" +
+        "Overwrite existed keys: %v", slots, typ, overwriteExistedKeys)
+    var (
+        scannedBatches int64
+    )
+    for _, slot := range slots {
+        var cursorID = 0
+        for round := 1; ; round++ {
+            var (
+                rawRows Rows
+                err  error
+            )
+
+            for i :=0; ; i++ {
+                var newCursorID int
+                if rawRows, newCursorID, err = Scan(cli, slot, cursorID, batchSize, typ, overwriteExistedKeys); err != nil {
+                    if i >= maxRetry- 1 {
+                        log.Fatalf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
+                        return 0
+                    }
+                    log.Errorf("scan cursor %d failed: '%v' @round %d, retrying in %s...", cursorID, err, i, retryInterval)
+                    time.Sleep(retryInterval)
+                    continue
+                }
+                cursorID = newCursorID
+                scannedBatches++
+                break
+            }
+
+            rawRowsCh <- rawRows
+            if cursorID == 0 {
+                break
+            }
+
+            if round%1000 == 0 {
+                log.Warningf("scanned %d keys for slot %d", batchSize*round, slot)
+            }
+        }
+        log.Warningf("Scanned slot %d", slot)
+    }
+    close(rawRowsCh)
+
+    return scannedBatches
 }
 
 func ParseRedisType(typeStr string) (RedisType, error) {
@@ -196,11 +250,16 @@ func (ess *Stats) String() string {
     return sb.String()
 }
 
+type Diff interface{
+    Output(w io.StringWriter) error
+}
+
 type Row struct {
     K                    string
     T                    RedisType
     OverwriteExistedKeys bool
     V                    interface{} // string, map[string]string, []redis.Z
+    D                    Diff
     TargetNotExists      bool
     Cardinality          int
 }
@@ -246,6 +305,66 @@ func (r *Row) ParseValue(cmder redis.Cmder) (obj interface{}, err error) {
     default:
         panic(fmt.Sprintf("unknown command type %T", cmder))
     }
+}
+
+type StringDiff struct {
+    K string
+    Mine, Other string
+}
+
+func (s *StringDiff) Output(w io.StringWriter) error {
+    _, err := w.WriteString(fmt.Sprintf("Key: %s, Mine: %s, Other: %s", s.K, s.Mine, s.Other))
+    return err
+}
+
+type CardDiff struct {
+    K string
+    Mine, Other int
+}
+
+func (s *CardDiff) Output(w io.StringWriter) error {
+    _, err := w.WriteString(fmt.Sprintf("Key: %s, Mine_card: %d, Other_card: %d", s.K, s.Mine, s.Other))
+    return err
+}
+
+func (r *Row) CalcDiff(val interface{}) Diff {
+    switch r.T {
+    case RedisTypeString:
+        if r.V.(string) != val.(string) {
+            return &StringDiff{
+                K: r.K,
+                Mine:  r.V.(string),
+                Other: val.(string),
+            }
+        }
+    case RedisTypeList, RedisTypeSet:
+        if card := len(val.([]string)); r.Cardinality != card {
+            return &CardDiff{
+                K: r.K,
+                Mine: r.Cardinality,
+                Other: card,
+            }
+        }
+    case RedisTypeHash:
+        if card := len(val.(map[string]string)); r.Cardinality != card {
+            return &CardDiff{
+                K: r.K,
+                Mine: r.Cardinality,
+                Other: card,
+            }
+        }
+    case RedisTypeZset:
+        if card := len(val.([]redis.Z)); r.Cardinality != card {
+            return &CardDiff{
+                K: r.K,
+                Mine: r.Cardinality,
+                Other: card,
+            }
+        }
+    default:
+        panic(fmt.Sprintf("unknown redis type %s", r.T))
+    }
+    return nil
 }
 
 func (r *Row) Set(p redis.Pipeliner) {
@@ -310,7 +429,7 @@ func (r *Row) XCard(p redis.Pipeliner) {
     }
 }
 
-func (r *Row) Delete(p redis.Pipeliner) {
+func (r *Row) Del(p redis.Pipeliner) {
     p.Del(r.K)
 }
 
@@ -401,6 +520,42 @@ func (rs Rows) MGet(client *redis.Client) error {
     return nil
 }
 
+func (rs Rows) MDiff(client *redis.Client) error {
+    if len(rs) == 0 {
+        return nil
+    }
+    if rs[0].T == RedisTypeUnknown {
+        panic("MDiff: unknwon type")
+    }
+    p := client.Pipeline()
+    for _, row := range rs {
+        row.XCard(p)
+    }
+    cmders, cmdErr := p.Exec()
+    if cmdErr != nil {
+        log.Errorf("Rows::MGet pipeline execution failed: %v", cmdErr)
+        return cmdErr
+    }
+    for idx, cmder := range cmders {
+        card, err := cmder.(*redis.IntCmd).Result()
+        if err != nil {
+            log.Errorf("cmd '%s' failed: %v", cmder.(*redis.IntCmd).String(), err)
+            return err
+        }
+        if card > math.MaxInt32 {
+            panic(fmt.Sprintf("card(%d) > math.MaxInt32", card))
+        }
+        if int(card) != rs[idx].Cardinality {
+            rs[idx].D = &CardDiff{
+                K:     rs[idx].K,
+                Mine:  rs[idx].Cardinality,
+                Other: int(card),
+            }
+        }
+    }
+    return nil
+}
+
 func (rs Rows) MGetWithRetry(client *redis.Client, maxRetry int) error {
     for i := 1; ; i++ {
         if err := rs.MGet( client); err != nil {
@@ -421,7 +576,7 @@ func (rs Rows) MSet(target *redis.Client, notLogExistedKeys bool) error {
         return nil
     }
     if !rs[0].OverwriteExistedKeys {
-        if err := rs.Exists(target); err != nil {
+        if err := rs.MExists(target); err != nil {
             log.Errorf("rs.Exists failed: '%v'", err)
             return err
         }
@@ -460,16 +615,16 @@ func (rs Rows) MSetWithRetry(client *redis.Client, notLogExistedKeys bool, maxRe
     }
 }
 
-func (rs Rows) Delete(target *redis.Client) error {
+func (rs Rows) MDel(target *redis.Client) error {
     p := target.Pipeline()
     for _, row := range rs {
-        row.Delete(p)
+        row.Del(p)
     }
     cmders, cmdErr := p.Exec()
     return parseErr(cmders, cmdErr)
 }
 
-func (rs Rows) Exists(target *redis.Client) error {
+func (rs Rows) MExists(target *redis.Client) error {
     p := target.Pipeline()
     for _, row := range rs {
         p.Exists(row.K)
@@ -489,7 +644,7 @@ func (rs Rows) Exists(target *redis.Client) error {
     return nil
 }
 
-func (rs Rows) Card(target *redis.Client) error {
+func (rs Rows) MCard(target *redis.Client) error {
     if len(rs) == 0 {
         return nil
     }

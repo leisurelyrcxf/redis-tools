@@ -2,18 +2,30 @@ package main
 
 import (
     "flag"
+    "io"
     "net"
+    "strings"
+    "sync"
+    "sync/atomic"
     "time"
 
     "github.com/go-redis/redis"
-    "github.com/leisurelyrcxf/redis-tools/cmd"
     log "github.com/sirupsen/logrus"
+
+    "github.com/leisurelyrcxf/redis-tools/cmd"
+    "github.com/leisurelyrcxf/redis-tools/cmd/utils"
 )
 
 func main()  {
+    maxSlotNum := flag.Int("max-slot-num", 0, "max slot number")
+    slotsDesc := flag.String("slots",  "-1,-2", "slots")
     sourceAddr := flag.String("addr", "", "source addr")
+    batchSize := flag.Int("batch-size", 100, "batch size")
+    writerCount := flag.Int("writer", 4, "reader count")
+    maxBuffered := flag.Int("max-buffered", 1024, "max buffered batch size")
 
     flag.Parse()
+    var slots = utils.ParseSlots(*maxSlotNum, *slotsDesc)
     if *sourceAddr == "" {
         log.Fatalf("source addr not provided")
     }
@@ -31,36 +43,42 @@ func main()  {
             WriteTimeout:       120*time.Second,
             IdleCheckFrequency: time.Second*10,
         })
+
+        writerWg sync.WaitGroup
+
+        rawRowsCh                                  = make(chan cmd.Rows, *maxBuffered)
+        successfulWriteBatches, failedWriteBatches int64
+
+        isRetryableErr = func(err error) bool {
+            return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
+        }
     )
 
-    const batchSize = 1000
+    for i := 0; i < *writerCount; i++ {
+        writerWg.Add(1)
 
-    for slot := 0; slot < 16384; slot++ {
-        var cursorID = 0
-        for round := 1; ; round++ {
-            var (
-                rows cmd.Rows
-                err  error
-            )
-            if rows, cursorID, err = cmd.Scan(srcClient, cursorID, slot, batchSize); err != nil {
-                log.Fatalf("scan slot %d failed: '%v'", slot, err)
-            }
+        go func() {
+            defer writerWg.Done()
 
-            if err = rows.Delete(srcClient); err != nil {
-                log.Fatalf("Del slot %d failed: '%v'", slot, err)
-            }
-
-            if cursorID == 0 {
-                if (slot+1) % 256 == 0 {
-                    log.Infof("del all keys of slot %d", slot)
+            for rows := range rawRowsCh {
+                if err := utils.ExecWithRetry(func() error {
+                    return rows.MDel(srcClient)
+                }, 10, time.Second, isRetryableErr); err != nil {
+                    atomic.AddInt64(&failedWriteBatches, 1)
+                    log.Fatalf("[Manual] Read failed: %v @round %d, keys: %v", err, i, rows.Keys())
+                } else {
+                    log.Infof("Read %d batches successfully @round %d", atomic.AddInt64(&successfulWriteBatches, 1), i)
                 }
-                break
             }
-
-            if round%100 == 0 {
-                log.Infof("round %d finished for slot %d", round, slot)
-            }
-        }
+        }()
     }
+
+    scannedBatches := cmd.ScanSlots(srcClient, slots, *batchSize, 10, time.Second, rawRowsCh)
+    writerWg.Wait()
+
+    if failedWriteBatches == 0 {
+        panic("")
+    }
+    utils.Assert(failedWriteBatches == 0 && successfulWriteBatches == scannedBatches)
     log.Infof("del keys succeeded")
 }

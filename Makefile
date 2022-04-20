@@ -28,8 +28,11 @@ deps:
 	env GO111MODULE=on go mod download
 	env GO111MODULE=on go mod vendor
 
-recovery:
-	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o recovery ./cmd/recovery
+redis-recovery:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o redis-recovery ./cmd/recovery
+
+redis-diff:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o redis-diff ./cmd/diff
 
 cleanup:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o cleanup ./cmd/cleanup
@@ -43,8 +46,8 @@ find-key:
 perf:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o hperf ./cmd/perf
 
-analysis:
-	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o analysis ./cmd/analysis
+redis-analysis:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o redis-analysis ./cmd/analysis
 
 fill-redis:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o fill-redis ./cmd/fill

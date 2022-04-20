@@ -2,8 +2,10 @@ package main
 
 import (
     "flag"
+    "fmt"
     "io"
     "net"
+    "os"
     "strings"
     "sync"
     "sync/atomic"
@@ -26,9 +28,6 @@ func main()  {
     slotsDesc := flag.String("slots",  "-1,-2", "slots")
     sourceAddr := flag.String("source-addr", "", "source addr")
     targetAddr := flag.String("target-addr", "", "target addr")
-    notLogExistedKeys := flag.Bool("not-log-existed-keys", false, "not log existed keys")
-    dataType := flag.String("data-type", "", "data types could be 'string', 'hash', 'zset'")
-    overwriteExistedKeys := flag.Bool("overwrite", false, "overwrite existed keys")
     expire := flag.Duration("expire", 0, "expire time")
     batchSize := flag.Int("batch-size", 100, "batch size")
     readerCount := flag.Int("reader", 4, "reader count")
@@ -39,6 +38,8 @@ func main()  {
     if *expire > 0 {
         cmd.DefaultExpire = *expire
     }
+    flag.Parse()
+    var slots = utils.ParseSlots(*maxSlotNum, *slotsDesc)
     if *sourceAddr == "" {
         log.Fatalf("source addr not provided")
     }
@@ -50,13 +51,6 @@ func main()  {
     }
     if _, _, err := net.SplitHostPort(*targetAddr); err != nil {
         log.Fatalf("target addr not valid: %v", err)
-    }
-    var redisType = cmd.RedisTypeUnknown
-    if *dataType != "" {
-        var err error
-        if redisType, err = cmd.ParseRedisType(*dataType); err != nil {
-            log.Fatalf("unknown data type: %v", *dataType)
-        }
     }
 
     var (
@@ -103,10 +97,10 @@ func main()  {
 
             for rows := range rawRowsCh {
                 if err := utils.ExecWithRetry(func() error {
-                    return rows.MGet(srcClient)
+                    return rows.MCard(srcClient)
                 }, maxRetry, retryInterval, isRetryableErr); err != nil {
                     atomic.AddInt64(&failedReadBatches, 1)
-                    log.Errorf("[Manual] Read failed: %v, keys: %v", err, rows.Keys())
+                    log.Fatalf("[Manual] Read failed: %v, keys: %v", err, rows.Keys())
                 } else {
                     rowsWithValueCh <- rows
                     log.Infof("Read %d batches successfully", atomic.AddInt64(&successfulReadBatches, 1))
@@ -128,25 +122,38 @@ func main()  {
     for i := 0; i < *writerCount; i++ {
         writerWg.Add(1)
 
-        go func() {
+        go func(i int) {
             defer writerWg.Done()
 
+            w, err := os.Create(fmt.Sprintf("comparator-%d", i))
+            if err != nil {
+                panic(err)
+            }
             for rows := range rowsWithValueCh {
                 if err := utils.ExecWithRetry(func() error {
-                    return rows.MSet(targetClient, *notLogExistedKeys)
+                    return rows.MDiff(targetClient)
                 }, maxRetry, retryInterval, isRetryableErr); err != nil {
-                    atomic.AddInt64(&failedReadBatches, 1)
-                    log.Errorf("[Manual] Write failed: '%v', keys: %v", err, rows.Keys())
+                    atomic.AddInt64(&failedWriteBatches, 1)
+                    log.Fatalf("[Manual] Write failed: '%v' keys: %v", err, rows.Keys())
                 } else {
-                    log.Infof("Written %d batches successfully", atomic.AddInt64(&successfulWriteBatches, 1))
+                    log.Infof("Compare %d batches successfully %d ", atomic.AddInt64(&successfulWriteBatches, 1))
+                    for _, row := range rows {
+                        if row.D != nil {
+                            if err := row.D.Output(w); err != nil {
+                                log.Fatalf("Output error: %v", err)
+                            }
+                            if _, err = w.Write([]byte{'\n'}); err != nil {
+                                log.Fatalf("Write error: %v", err)
+                            }
+                        }
+                    }
                 }
             }
-        }()
+            _ = w.Close()
+        }(i)
     }
 
-
-    var slots = utils.ParseSlots(*maxSlotNum, *slotsDesc)
-    scannedBatches := cmd.ScanSlotsRaw(srcClient, slots, redisType, *overwriteExistedKeys, *batchSize, maxRetry, retryInterval, rawRowsCh)
+    scannedBatches := cmd.ScanSlots(srcClient, slots, *batchSize, maxRetry, retryInterval, rawRowsCh)
 
     readerWg.Wait()
     writerWg.Wait()

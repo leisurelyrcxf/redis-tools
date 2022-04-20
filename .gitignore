@@ -1,10 +1,12 @@
 vendor/*
 go.sum
 .idea/*
-recovery
+redis-*
 flushall
 cleanup
 find-key
 hperf
 analysis
 fill-redis
+result
+comparator*

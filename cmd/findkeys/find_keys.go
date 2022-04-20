@@ -2,6 +2,7 @@ package main
 
 import (
     "flag"
+    "github.com/leisurelyrcxf/redis-tools/cmd/utils"
     "io"
     "net"
     "os"
@@ -16,12 +17,14 @@ import (
 )
 
 func main()  {
-    addr := flag.String("addr", "", "addr")
     maxSlotNum := flag.Int("max-slot-num", 0, "max slot number")
+    slotsDesc := flag.String("slots",  "-1,-2", "slots")
+    addr := flag.String("addr", "", "addr")
     slot := flag.Int("slot", -1, "slot")
     logLevel := flag.String("log-level", "error", "log level, can be 'panic', 'error', 'fatal', 'warn', 'info'")
 
     flag.Parse()
+    var slots = utils.ParseSlots(*maxSlotNum, *slotsDesc)
     if *addr == "" {
         log.Fatalf("source addr not provided")
     }
@@ -120,54 +123,10 @@ func main()  {
         }()
     }
 
-    var slots []int
-    if *maxSlotNum != 0 {
-        for slot := 0; slot < *maxSlotNum; slot++ {
-            slots = append(slots, slot)
-        }
-    } else {
-        slots = append(slots, *slot)
-    }
-
-    var scannedBatches int
-    for _, slot := range slots {
-        var cursorID = 0
-        for round := 1; ; round++ {
-            var (
-                rawRows cmd.Rows
-                err  error
-            )
-
-            for i :=0; ; i++ {
-                var newCursorID int
-                if rawRows, newCursorID, err = cmd.Scan(cli, slot, cursorID, batchSize); err != nil {
-                    if i >= maxRetry- 1 {
-                        log.Fatalf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
-                        return
-                    }
-                    log.Errorf("scan cursor %d failed: '%v' @round %d, retrying in %s...", cursorID, err, i, retryInterval)
-                    time.Sleep(retryInterval)
-                    continue
-                }
-                cursorID = newCursorID
-                scannedBatches++
-                break
-            }
-
-            rawRowsCh <- rawRows
-            if cursorID == 0 {
-                log.Infof("scanned all keys of slot %d", slot)
-                break
-            }
-
-            if round%100 == 0 {
-                log.Infof("scanned %d keys for slot %d", round*batchSize, slot)
-            }
-        }
-    }
-    close(rawRowsCh)
 
 
+
+    cmd.ScanSlots(cli, slots, batchSize, maxRetry, retryInterval, rawRowsCh)
     readerWg.Wait()
     for _, key := range keys {
         println(key)
