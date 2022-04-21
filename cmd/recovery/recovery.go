@@ -110,7 +110,7 @@ func main()  {
         if diffBatches == 0 {
             log.Warningf("source and dest are the same")
         } else {
-            log.Warningf("migration succeeded")
+            log.Warningf("migration succeeded, migrated %d batches", diffBatches)
         }
     } else {
         if diffFailedReadBatches > 0 {

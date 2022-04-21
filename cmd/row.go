@@ -2,7 +2,6 @@ package cmd
 
 import (
     "fmt"
-    "github.com/golang/glog"
     "github.com/leisurelyrcxf/redis-tools/cmd/utils"
     "io"
     "math"
@@ -179,7 +178,7 @@ func ParseRedisType(typeStr string) (RedisType, error) {
 func MustParseRedisType(typeStr string) RedisType {
     typ, err := ParseRedisType(typeStr)
     if err != nil {
-        glog.Fatalf("parse redis type failed: '%s'", typeStr)
+        log.Fatalf("parse redis type failed: '%s'", typeStr)
         return RedisTypeUnknown
     }
     return typ
@@ -448,9 +447,10 @@ func (r *Row) Set(p *Pipeline) error {
                 return err
             }
         }
-        //if DefaultExpire > 0 {
-        //    p.Expire(r.K, DefaultExpire)
-        //}
+        if DefaultExpire > 0 {
+            utils.Assert(false) // TODO temporarily forbidden
+            p.Expire(r.K, DefaultExpire)
+        }
         return nil
     case RedisTypeZset:
         if len(r.V.([]redis.Z)) == 0 {
@@ -619,10 +619,10 @@ func (rs Rows) MGetWithRetry(client *redis.Client, maxRetry int) error {
     for i := 1; ; i++ {
         if err := rs.MGet( client); err != nil {
             if i >= maxRetry {
-                glog.Errorf("MGet failed: '%v' after retried for %d times", err, maxRetry)
+                log.Errorf("MGet failed: '%v' after retried for %d times", err, maxRetry)
                 return err
             }
-            glog.V(11).Infof("MGet failed: '%v', retry in 1s...", err)
+            log.Infof("MGet failed: '%v', retry in 1s...", err)
             time.Sleep(time.Second)
             continue
         }
@@ -664,10 +664,10 @@ func (rs Rows) MSetWithRetry(client *redis.Client, pipeCap int, notLogExistedKey
     for i := 1; ; i++ {
         if err := rs.MSet(client, pipeCap, notLogExistedKeys); err != nil {
             if i >= maxRetry {
-                glog.Errorf("MSet failed: '%v' after retried for %d times", err, maxRetry)
+                log.Errorf("MSet failed: '%v' after retried for %d times", err, maxRetry)
                 return err
             }
-            glog.V(11).Infof("MSet failed: '%v', retry in 1s...", err)
+            log.Infof("MSet failed: '%v', retry in 1s...", err)
             time.Sleep(time.Second)
             continue
         }
