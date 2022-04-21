@@ -141,7 +141,7 @@ func ScanSlotsRawAsync(cli *redis.Client, slots []int, typ RedisType, overwriteE
                             log.Errorf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
                             return
                         }
-                        log.Errorf("scan cursor %d failed: '%v' @round %d, retrying in %s...", cursorID, err, i, retryInterval)
+                        log.Warningf("scan cursor %d failed: '%v' @round %d, retrying in %s...", cursorID, err, i, retryInterval)
                         time.Sleep(retryInterval)
                         continue
                     }
@@ -421,7 +421,7 @@ func (r *Row) CalcDiff(val interface{}) Diff {
 func (r *Row) Set(p *Pipeline) error {
     switch r.T {
     case RedisTypeString:
-        p.SetNX(r.K, r.V, DefaultExpire) // TODO check this.
+        p.SetNX(r.K, r.V, DefaultExpire)
         return nil
     case RedisTypeList:
         p.Del(r.K)
@@ -544,8 +544,7 @@ func (rs Rows) Types(client *redis.Client) (err error) {
     for idx, cmder := range cmders {
         typeString, err := cmder.(*redis.StatusCmd).Result()
         if err != nil {
-            log.Errorf("cmd '%s' failed: %v", cmder.(*redis.StatusCmd).String(), err)
-            return err
+            return errors.Errorf("cmd '%s' failed: %v", cmder.(*redis.StatusCmd).String(), err)
         }
         if rs[idx].T, err = ParseRedisType(typeString); err != nil {
             log.Errorf("type unknown: %v", err)
@@ -561,26 +560,22 @@ func (rs Rows) MGet(client *redis.Client, checkLargeObj bool) error {
     }
     if rs[0].T == RedisTypeUnknown {
         if err := rs.Types(client); err != nil {
-            log.Errorf("can't get types: '%v'", err)
-            return err
+            return errors.Errorf("MGet::Types failed: %v", err)
         }
     }
     if checkLargeObj {
         if err := rs.MCard(client); err != nil {
-            log.Errorf("[MGet] MCard failed: '%v'", err)
-            return err
+            return errors.Errorf("MGet::MCard failed: %v", err)
         }
     }
 
-    // TODO ignore wrong types error
     p := client.Pipeline()
     for _, row := range rs {
         row.Get(p)
     }
     cmders, cmdErr := p.Exec()
     if cmdErr != nil {
-        log.Errorf("Rows::MGet pipeline execution failed: %v", cmdErr)
-        return cmdErr
+        return errors.Errorf("Rows::MGet pipeline execution failed: %v", cmdErr)
     }
     for idx, cmder := range cmders {
         if _, ok := cmder.(*redis.StatusCmd); ok {
@@ -609,14 +604,12 @@ func (rs Rows) MDiff(client *redis.Client) error {
     }
     cmders, cmdErr := p.Exec()
     if cmdErr != nil {
-        log.Errorf("Rows::MGet pipeline execution failed: %v", cmdErr)
-        return cmdErr
+        return errors.Errorf("Rows::MGet pipeline execution failed: %v", cmdErr)
     }
     for idx, cmder := range cmders {
         card, err := cmder.(*redis.IntCmd).Result()
         if err != nil {
-            log.Errorf("cmd '%s' failed: %v", cmder.(*redis.IntCmd).String(), err)
-            return err
+            return errors.Errorf("cmd '%s' failed: %v", cmder.(*redis.IntCmd).String(), err)
         }
         if card > math.MaxInt32 {
             panic(fmt.Sprintf("card(%d) > math.MaxInt32", card))
@@ -639,7 +632,7 @@ func (rs Rows) MGetWithRetry(client *redis.Client, checkLargeObj bool, maxRetry 
                 log.Errorf("MGet failed: '%v' after retried for %d times", err, maxRetry)
                 return err
             }
-            log.Infof("MGet failed: '%v', retry in 1s...", err)
+            log.Warningf("MGet failed: '%v', retry in 1s...", err)
             time.Sleep(time.Second)
             continue
         }
@@ -653,8 +646,7 @@ func (rs Rows) MSet(target *redis.Client, pipelineCap int, logExistedKey bool) e
     }
     if !rs[0].OverwriteExistedKeys {
         if err := rs.MExists(target); err != nil {
-            log.Errorf("rs.Exists failed: '%v'", err)
-            return err
+            return errors.Errorf("rs.Exists failed: '%v'", err)
         }
     }
 
@@ -713,8 +705,7 @@ func (rs Rows) MExists(target *redis.Client) error {
     for idx, cmder := range cmders {
         existsVal, err := cmder.(*redis.IntCmd).Result()
         if err != nil {
-            log.Errorf("cmd '%s' failed: %v", cmder.(*redis.IntCmd).String(), err)
-            return err
+            return errors.Errorf("cmd '%s' failed: %v", cmder.(*redis.IntCmd).String(), err)
         }
         rs[idx].TargetNotExists = existsVal == 0
     }
@@ -728,8 +719,7 @@ func (rs Rows) MCard(target *redis.Client) error {
 
     if rs[0].T == RedisTypeUnknown {
         if err := rs.Types(target); err != nil {
-            log.Errorf("can't get types: '%v'", err)
-            return err
+            return errors.Errorf("Rows::MCard: can't get types: '%v'", err)
         }
     }
 
@@ -744,8 +734,7 @@ func (rs Rows) MCard(target *redis.Client) error {
     for idx, cmder := range cmders {
         card, err := cmder.(*redis.IntCmd).Result()
         if err != nil {
-            log.Errorf("cmd '%s' failed: %v", cmder.(*redis.IntCmd).String(), err)
-            return err
+            return errors.Errorf("cmd '%s' failed: %v", cmder.(*redis.IntCmd).String(), err)
         }
         if card > math.MaxInt32 {
             return errors.Errorf("card(%d) > math.MaxInt32", card)
