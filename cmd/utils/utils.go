@@ -1,12 +1,28 @@
 package utils
 
 import (
+    "fmt"
+    "io"
     "strconv"
     "strings"
     "time"
 
     log "github.com/sirupsen/logrus"
 )
+
+type alsoOutputStd struct {
+    w io.StringWriter
+}
+
+func (a alsoOutputStd) WriteString(str string) (n int, err error) {
+    n, err = a.w.WriteString(str)
+    fmt.Print(str)
+    return n, err
+}
+
+func AlsoOutputStd(w io.StringWriter) io.StringWriter {
+    return alsoOutputStd{w:w}
+}
 
 func Assert(b bool) {
     if !b {

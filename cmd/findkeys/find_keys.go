@@ -123,10 +123,8 @@ func main()  {
         }()
     }
 
-
-
-
-    cmd.ScanSlots(cli, slots, batchSize, maxRetry, retryInterval, rawRowsCh)
+    var scannedBatches int64
+    cmd.ScanSlotsAsync(cli, slots, batchSize, maxRetry, retryInterval, &scannedBatches, rawRowsCh)
     readerWg.Wait()
     for _, key := range keys {
         println(key)

@@ -74,7 +74,8 @@ func main()  {
         }()
     }
 
-    scannedBatches := cmd.ScanSlots(srcClient, slots, *batchSize, 10, time.Second, rawRowsCh)
+    var scannedBatches int64
+    cmd.ScanSlotsAsync(srcClient, slots, *batchSize, 10, time.Second, &scannedBatches, rawRowsCh)
     writerWg.Wait()
 
     if failedWriteBatches == 0 {

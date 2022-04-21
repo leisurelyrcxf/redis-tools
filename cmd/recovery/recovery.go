@@ -30,16 +30,22 @@ func main()  {
     dataType := flag.String("data-type", "", "data types could be 'string', 'hash', 'zset'")
     overwriteExistedKeys := flag.Bool("overwrite", false, "overwrite existed keys")
     expire := flag.Duration("expire", 0, "expire time")
-    batchSize := flag.Int("batch-size", 100, "batch size")
+    batchSize := flag.Int("batch-size", 256, "batch size")
     readerCount := flag.Int("reader", 4, "reader count")
     writerCount := flag.Int("writer", 4, "writer count")
-    maxBuffered := flag.Int("max-buffered", 1024, "max buffered batch size")
+    maxBuffered := flag.Int("max-buffered", 256, "max buffered batch size")
+    logLevel := flag.String("log-level", "error", "log level, can be 'panic', 'error', 'fatal', 'warn', 'info'")
 
     flag.Parse()
     var slots = utils.ParseSlots(*maxSlotNum, *slotsDesc)
     if *expire > 0 {
         cmd.DefaultExpire = *expire
     }
+    lvl, err := log.ParseLevel(*logLevel)
+    if err != nil {
+        log.Fatalf("invalid log level: '%v'", err)
+    }
+    log.SetLevel(lvl)
     if *sourceAddr == "" {
         log.Fatalf("source addr not provided")
     }
@@ -86,27 +92,47 @@ func main()  {
     var (
         input  = make(chan cmd.Rows, *maxBuffered)
     )
-    cmd.ScanSlotsRaw(srcClient, slots, redisType, *overwriteExistedKeys, *batchSize, maxRetry, retryInterval, input)
-    var successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches int64
-    diffCh := cmd.RedisDiff(input, *readerCount, *writerCount, srcClient, targetClient, *maxBuffered, maxRetry, retryInterval,
-        &successfulReadBatches, &failedReadBatches, &successfulWriteBatches, &failedWriteBatches)
-    _, failedReadBatches, _, failedWriteBatches =
-         migrate(diffCh, *readerCount, *writerCount, srcClient, targetClient, *maxBuffered, *batchSize, !*notLogExistedKeys)
-    if failedReadBatches == 0 && failedWriteBatches == 0 {
-        log.Infof("migration succeeded")
-    } else {
-        if failedReadBatches > 0 {
-            log.Errorf("%d read batches failed", failedReadBatches)
+    var scannedBatches, diffOKReadBatches, diffFailedReadBatches, diffOKWriteBatches, diffFailedWriteBatches, diffBatches int64
+    cmd.ScanSlotsRawAsync(srcClient, slots, redisType, *overwriteExistedKeys, *batchSize, maxRetry, retryInterval, &scannedBatches, input)
+    diffCh := cmd.DiffAsync(input, *readerCount, *writerCount, srcClient, targetClient, *maxBuffered, maxRetry, retryInterval,
+        &diffOKReadBatches, &diffFailedReadBatches, &diffOKWriteBatches, &diffFailedWriteBatches, &diffBatches)
+
+    var migrateOKReadBatches, migrateFailedReadBatches, migrateOKWriteBatches, migrateFailedWriteBatches int64
+    migrateDone := migrateAsync(diffCh, *readerCount, *writerCount, srcClient, targetClient, *maxBuffered, *batchSize, !*notLogExistedKeys,
+             &migrateOKReadBatches, &migrateFailedReadBatches, &migrateOKWriteBatches, &migrateFailedWriteBatches)
+    <- migrateDone
+
+    utils.Assert(scannedBatches == diffOKReadBatches+diffFailedReadBatches)
+    utils.Assert(diffOKReadBatches == diffOKWriteBatches+diffFailedWriteBatches)
+    utils.Assert(diffBatches == migrateOKReadBatches + migrateFailedReadBatches)
+    utils.Assert(migrateOKReadBatches == migrateOKWriteBatches + migrateFailedWriteBatches)
+    if diffFailedReadBatches == 0 && diffFailedWriteBatches == 0 && migrateFailedReadBatches == 0 && migrateFailedWriteBatches == 0 {
+        if diffBatches == 0 {
+            log.Warningf("source and dest are the same")
+        } else {
+            log.Warningf("migration succeeded")
         }
-        if failedWriteBatches > 0 {
-            log.Errorf("%d write batches failed", failedWriteBatches)
+    } else {
+        if diffFailedReadBatches > 0 {
+            log.Errorf("%d diff read batches failed", diffFailedReadBatches)
+        }
+        if diffFailedWriteBatches > 0 {
+            log.Errorf("%d diff write batches failed", diffFailedWriteBatches)
+        }
+        if migrateFailedReadBatches > 0 {
+            log.Errorf("%d migrate read batches failed", diffFailedReadBatches)
+        }
+        if migrateFailedWriteBatches > 0 {
+            log.Errorf("%d migrate write batches failed", diffFailedWriteBatches)
         }
     }
 }
 
-func migrate(input <-chan cmd.Rows, readerCount, writerCount int,
+func migrateAsync(input <-chan cmd.Rows, readerCount, writerCount int,
     srcClient *redis.Client, targetClient *redis.Client,
-    maxBuffered int, pipeCap int, logExistedKeys bool) (successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches int64) {
+    maxBuffered int, pipeCap int, logExistedKeys bool,
+    successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches *int64) (done chan struct{}) {
+    done = make(chan struct{})
     var (
         readerWg sync.WaitGroup
         rowsRead = make(chan cmd.Rows, maxBuffered)
@@ -125,12 +151,12 @@ func migrate(input <-chan cmd.Rows, readerCount, writerCount int,
                 if err := utils.ExecWithRetry(func() error {
                     return rows.MGet(srcClient)
                 }, maxRetry, retryInterval, isRetryableErr); err != nil {
-                    atomic.AddInt64(&failedReadBatches, 1)
-                    log.Errorf("[Manual] Read failed: %v, keys: %v", err, rows.Keys())
+                    atomic.AddInt64(failedReadBatches, 1)
+                    log.Errorf("[migrateAsync][Manual] Read failed: %v, keys: %v", err, rows.Keys())
                 } else {
                     rowsRead <- rows
-                    tmp := atomic.AddInt64(&successfulReadBatches, 1)
-                    log.Infof("Read %d batches successfully", tmp)
+                    tmp := atomic.AddInt64(successfulReadBatches, 1)
+                    log.Infof("[migrateAsync] Read %d batches successfully", tmp)
                 }
             }
         }()
@@ -155,15 +181,20 @@ func migrate(input <-chan cmd.Rows, readerCount, writerCount int,
                 if err := utils.ExecWithRetry(func() error {
                     return rows.MSet(targetClient, pipeCap, logExistedKeys)
                 }, maxRetry, retryInterval, isRetryableErr); err != nil {
-                    atomic.AddInt64(&failedWriteBatches, 1)
-                    log.Errorf("[Manual] Write failed: '%v', keys: %v", err, rows.Keys())
+                    atomic.AddInt64(failedWriteBatches, 1)
+                    log.Errorf("[migrateAsync][Manual] Write failed: '%v', keys: %v", err, rows.Keys())
                 } else {
-                    tmp := atomic.AddInt64(&successfulWriteBatches, 1)
-                    log.Infof("Written %d batches successfully", tmp)
+                    tmp := atomic.AddInt64(successfulWriteBatches, 1)
+                    log.Infof("[migrateAsync] Written %d batches successfully", tmp)
                 }
             }
         }()
     }
-    writerWg.Wait()
-    return successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches
+
+    go func() {
+        writerWg.Wait()
+        close(done)
+    }()
+
+    return done
 }

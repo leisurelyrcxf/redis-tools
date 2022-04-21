@@ -111,62 +111,60 @@ func Scan(cli *redis.Client, slot int, cursorId int, batchSize int, typ RedisTyp
     return rows, newCid, nil
 }
 
-func ScanSlots(cli *redis.Client, slots []int,
-    batchSize, maxRetry int, retryInterval time.Duration, rawRowsCh chan <-Rows) int64 {
-    return ScanSlotsRaw(cli, slots, RedisTypeUnknown, false, batchSize, maxRetry, retryInterval, rawRowsCh)
+func ScanSlotsAsync(cli *redis.Client, slots []int,
+    batchSize, maxRetry int, retryInterval time.Duration, scannedBatches *int64, rawRowsCh chan <-Rows) {
+    ScanSlotsRawAsync(cli, slots, RedisTypeUnknown, false, batchSize, maxRetry, retryInterval, scannedBatches, rawRowsCh)
 }
 
-func ScanSlotsRaw(cli *redis.Client, slots []int, typ RedisType, overwriteExistedKeys bool,
-    batchSize, maxRetry int, retryInterval time.Duration, rawRowsCh chan <-Rows) int64 {
+func ScanSlotsRawAsync(cli *redis.Client, slots []int, typ RedisType, overwriteExistedKeys bool,
+    batchSize, maxRetry int, retryInterval time.Duration, scannedBatches *int64, scannedRows chan <-Rows) {
     log.Infof("Scan slots: %v\n" +
         "Data type: '%s'\n" +
         "Overwrite existed keys: %v", slots, typ, overwriteExistedKeys)
-    var (
-        scannedBatches int64
-    )
-    defer func() {
-        close(rawRowsCh)
-    }()
+    go func () {
+        defer func() {
+            close(scannedRows)
+        }()
 
-    for _, slot := range slots {
-        var cursorID = 0
-        for round := 1; ; round++ {
-            var (
-                rawRows Rows
-                err  error
-            )
+        for _, slot := range slots {
+            var cursorID = 0
+            for round := 1; ; round++ {
+                var (
+                    rawRows Rows
+                    err     error
+                )
 
-            for i :=0; ; i++ {
-                var newCursorID int
-                if rawRows, newCursorID, err = Scan(cli, slot, cursorID, batchSize, typ, overwriteExistedKeys); err != nil {
-                    if i >= maxRetry- 1 {
-                        log.Errorf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
-                        return 0
+                for i := 0; ; i++ {
+                    var newCursorID int
+                    if rawRows, newCursorID, err = Scan(cli, slot, cursorID, batchSize, typ, overwriteExistedKeys); err != nil {
+                        if i >= maxRetry-1 {
+                            log.Errorf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
+                            return
+                        }
+                        log.Errorf("scan cursor %d failed: '%v' @round %d, retrying in %s...", cursorID, err, i, retryInterval)
+                        time.Sleep(retryInterval)
+                        continue
                     }
-                    log.Errorf("scan cursor %d failed: '%v' @round %d, retrying in %s...", cursorID, err, i, retryInterval)
-                    time.Sleep(retryInterval)
-                    continue
+                    cursorID = newCursorID
+                    break
                 }
-                cursorID = newCursorID
-                break
-            }
 
-            if len(rawRows) > 0 {
-                rawRowsCh <- rawRows
-                scannedBatches++
-            }
-            
-            if cursorID == 0 {
-                break
-            }
+                if len(rawRows) > 0 {
+                    scannedRows <- rawRows
+                    atomic.AddInt64(scannedBatches, 1)
+                }
 
-            if round%1000 == 0 {
-                log.Warningf("scanned %d keys for slot %d", batchSize*round, slot)
+                if cursorID == 0 {
+                    log.Warningf("Scanned all keys for slot %d", slot)
+                    break
+                }
+
+                if round%1000 == 0 {
+                    log.Warningf("scanned %d keys for slot %d", batchSize*round, slot)
+                }
             }
         }
-        log.Warningf("Scanned slot %d", slot)
-    }
-    return scannedBatches
+    }()
 }
 
 func ParseRedisType(typeStr string) (RedisType, error) {
@@ -421,6 +419,7 @@ func (r *Row) Set(p *Pipeline) error {
         p.SetNX(r.K, r.V, DefaultExpire) // TODO check this.
         return nil
     case RedisTypeList:
+        p.Del(r.K)
         for _ ,v := range r.V.([]string) {
             p.RPush(r.K, v)
             if err := p.TryExec(); err != nil {
@@ -449,9 +448,9 @@ func (r *Row) Set(p *Pipeline) error {
                 return err
             }
         }
-        if DefaultExpire > 0 {
-            p.Expire(r.K, DefaultExpire)
-        }
+        //if DefaultExpire > 0 {
+        //    p.Expire(r.K, DefaultExpire)
+        //}
         return nil
     case RedisTypeZset:
         if len(r.V.([]redis.Z)) == 0 {
@@ -793,10 +792,10 @@ func parseErr(cmders []redis.Cmder, err error) (resultErr error) {
     return nil
 }
 
-func RedisDiff(input <-chan Rows, readerCount, writerCount int,
+func DiffAsync(input <-chan Rows, readerCount, writerCount int,
     srcClient *redis.Client, targetClient *redis.Client,
     maxBuffered int, maxRetry int, retryInterval time.Duration,
-    successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches *int64) (output chan Rows) {
+    successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches, diffBatches *int64) (output chan Rows) {
     output = make(chan Rows)
     var (
         readerWg sync.WaitGroup
@@ -817,11 +816,11 @@ func RedisDiff(input <-chan Rows, readerCount, writerCount int,
                     return rows.MCard(srcClient)
                 }, maxRetry, retryInterval, isRetryableErr); err != nil {
                     atomic.AddInt64(failedReadBatches, 1)
-                    log.Errorf("[Manual] Read failed: %v, keys: %v", err, rows.Keys())
+                    log.Errorf("[DiffAsync][Manual] MCard failed: %v, keys: %v", err, rows.Keys())
                 } else {
                     rowsRead <- rows
                     tmp := atomic.AddInt64(successfulReadBatches, 1)
-                    log.Infof("Read %d batches successfully", tmp)
+                    log.Infof("[DiffAsync] MCard %d batches successfully", tmp)
                 }
             }
         }()
@@ -847,13 +846,14 @@ func RedisDiff(input <-chan Rows, readerCount, writerCount int,
                     return rows.MDiff(targetClient)
                 }, maxRetry, retryInterval, isRetryableErr); err != nil {
                     atomic.AddInt64(failedWriteBatches, 1)
-                    log.Errorf("[Manual] Write failed: '%v' keys: %v", err, rows.Keys())
+                    log.Errorf("[DiffAsync][Manual] MDiff failed: '%v' keys: %v", err, rows.Keys())
                 } else {
                     tmp := atomic.AddInt64(successfulWriteBatches, 1)
-                    log.Infof("Compare %d batches successfully %d", tmp)
+                    log.Infof("[DiffAsync] MDiff %d batches successfully", tmp)
                     if rows = rows.Filter(func(row *Row) bool {
                         return row.D != nil
                     }); len(rows) > 0 {
+                        atomic.AddInt64(diffBatches, 1)
                         output <-rows
                     }
                 }

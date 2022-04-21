@@ -168,7 +168,7 @@ func (t *Task) Verify(ctx context.Context, cli *redis.Client) {
 }
 
 func (t *Task) Write(ctx context.Context, cli *redis.Client) {
-	err := t.Rows.MSetWithRetry( cli, true, 10)
+	err := t.Rows.MSetWithRetry(cli, len(t.Rows), true, 10)
 	var errCount int
 	if err != nil {
 		errCount = len(t.Rows)

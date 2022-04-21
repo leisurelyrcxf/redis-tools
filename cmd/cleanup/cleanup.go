@@ -90,7 +90,10 @@ func main()  {
         }()
     }
 
-    cmd.ScanSlots(cli, slots, batchSize, maxRetry, retryInterval, rawRowsCh)
+    var scannedBatches int64
+    cmd.ScanSlotsAsync(cli, slots, batchSize, maxRetry, retryInterval, &scannedBatches, rawRowsCh)
     readerWg.Wait()
+
+    utils.Assert(scannedBatches == failedReadBatches + successfulReadBatches)
     log.Infof("all readers finished")
 }

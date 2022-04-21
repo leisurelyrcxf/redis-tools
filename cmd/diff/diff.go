@@ -2,6 +2,7 @@ package main
 
 import (
     "flag"
+    "io"
     "net"
     "os"
     "time"
@@ -24,17 +25,19 @@ func main()  {
     sourceAddr := flag.String("source-addr", "", "source addr")
     targetAddr := flag.String("target-addr", "", "target addr")
     expire := flag.Duration("expire", 0, "expire time")
-    batchSize := flag.Int("batch-size", 100, "batch size")
+    batchSize := flag.Int("batch-size", 256, "batch size")
     readerCount := flag.Int("reader", 4, "reader count")
     writerCount := flag.Int("writer", 4, "writer count")
-    maxBuffered := flag.Int("max-buffered", 1024, "max buffered batch size")
+    maxBuffered := flag.Int("max-buffered", 256, "max buffered batch size")
+    logLevel := flag.String("log-level", "error", "log level, can be 'panic', 'error', 'fatal', 'warn', 'info'")
+    outputFileName := flag.String("output", "compare-result", "output file name")
+    outputToStd := flag.Bool("output-to-std", false, "output to std")
 
     flag.Parse()
+    var slots = utils.ParseSlots(*maxSlotNum, *slotsDesc)
     if *expire > 0 {
         cmd.DefaultExpire = *expire
     }
-    flag.Parse()
-    var slots = utils.ParseSlots(*maxSlotNum, *slotsDesc)
     if *sourceAddr == "" {
         log.Fatalf("source addr not provided")
     }
@@ -47,6 +50,14 @@ func main()  {
     if _, _, err := net.SplitHostPort(*targetAddr); err != nil {
         log.Fatalf("target addr not valid: %v", err)
     }
+    if *outputFileName == "" {
+        log.Fatalf("output file name empty")
+    }
+    lvl, err := log.ParseLevel(*logLevel)
+    if err != nil {
+        log.Fatalf("invalid log level: '%v'", err)
+    }
+    log.SetLevel(lvl)
 
     var (
         srcClient = redis.NewClient(&redis.Options{
@@ -70,28 +81,38 @@ func main()  {
         })
     )
 
-    w, err := os.Create("compare-result")
+    file, err := os.Create(*outputFileName)
     if err != nil {
         panic(err)
+    }
+    defer file.Close()
+
+    var w io.StringWriter = file
+    if *outputToStd {
+        w = utils.AlsoOutputStd(w)
     }
 
     var (
         input  = make(chan cmd.Rows, *maxBuffered)
     )
-    scannedBatches := cmd.ScanSlots(srcClient, slots, *batchSize, maxRetry, retryInterval, input)
-    var successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches int64
-    output := cmd.RedisDiff(input, *readerCount, *writerCount, srcClient, targetClient, *maxBuffered, maxRetry, retryInterval,
-        &successfulReadBatches, &failedReadBatches, &successfulWriteBatches, &failedWriteBatches)
+    var scannedBatches, successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches, diffBatches int64
+    cmd.ScanSlotsAsync(srcClient, slots, *batchSize, maxRetry, retryInterval, &scannedBatches, input)
+    output := cmd.DiffAsync(input, *readerCount, *writerCount, srcClient, targetClient, *maxBuffered, maxRetry, retryInterval,
+        &successfulReadBatches, &failedReadBatches, &successfulWriteBatches, &failedWriteBatches, &diffBatches)
 
     for rows := range output {
         for _, row := range rows {
             if err := row.D.Output(w); err != nil {
                 log.Fatalf("Output error: %v", err)
             }
-            if _, err = w.Write([]byte{'\n'}); err != nil {
+            if _, err = w.WriteString("\n"); err != nil {
                 log.Fatalf("Write error: %v", err)
             }
         }
+    }
+
+    if diffBatches == 0 {
+        _, _ = w.WriteString("source and target are the same")
     }
 
     if failedReadBatches == 0 && failedWriteBatches == 0 {
