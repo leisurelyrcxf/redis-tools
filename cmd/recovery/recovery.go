@@ -149,7 +149,7 @@ func migrateAsync(input <-chan cmd.Rows, readerCount, writerCount int,
 
             for rows := range input {
                 if err := utils.ExecWithRetry(func() error {
-                    return rows.MGet(srcClient)
+                    return rows.MGet(srcClient, true)
                 }, maxRetry, retryInterval, isRetryableErr); err != nil {
                     atomic.AddInt64(failedReadBatches, 1)
                     log.Errorf("[migrateAsync][Manual] Read failed: %v, keys: %v", err, rows.Keys())

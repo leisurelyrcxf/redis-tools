@@ -66,7 +66,7 @@ func main()  {
 
             for rows := range rawRowsCh {
                 for i := 0; ; i++ {
-                    if err := rows.MGet(cli); err != nil {
+                    if err := rows.MCard(cli); err != nil {
                         if i >= maxRetry- 1 || !isRetryableErr(err) {
                             atomic.AddInt64(&failedReadBatches, 1)
                             log.Errorf("[Manual] Read failed: %v @round %d, keys: %v", err, i, rows.Keys())
@@ -80,7 +80,7 @@ func main()  {
                     log.Infof("Read %d batches successfully @round %d", tmp, i)
 
                     for _, row := range rows {
-                        if row.IsValueEmpty() {
+                        if row.Cardinality == 0 {
                             log.Infof("%s key '%s' is empty", row.T, row.K)
                         }
                     }

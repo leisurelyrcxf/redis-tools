@@ -82,7 +82,7 @@ func main() {
                 }
 
                 start := time.Now()
-                _ = rows.MGet(cli)
+                _ = rows.MGet(cli, false)
                 successCount, errCount := rows.Stats()
                 atomic.AddInt64(&totalSucessCount, successCount)
                 atomic.AddInt64(&totalUserSeconds, int64(time.Since(start)/time.Microsecond)*successCount)

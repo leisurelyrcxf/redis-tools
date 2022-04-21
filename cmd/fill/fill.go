@@ -153,7 +153,7 @@ func (t *Task) GetErrCount() int64 {
 }
 
 func (t *Task) Verify(ctx context.Context, cli *redis.Client) {
-	if err := t.Rows.MGetWithRetry( cli, 10); err != nil {
+	if err := t.Rows.MGetWithRetry( cli, false, 10); err != nil {
 		t.Finish(len(t.Rows))
 		return
 	}

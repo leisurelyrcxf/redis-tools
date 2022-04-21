@@ -2,6 +2,7 @@ package cmd
 
 import (
     "fmt"
+    "github.com/CodisLabs/codis/pkg/utils/errors"
     "github.com/leisurelyrcxf/redis-tools/cmd/utils"
     "io"
     "math"
@@ -310,6 +311,11 @@ type Row struct {
 }
 
 func (r *Row) Get(p redis.Pipeliner) {
+    if r.Cardinality > 6000000 {
+        p.Ping() // Placeholder, TODO impl for big obj
+        return
+    }
+
     switch r.T {
     case RedisTypeString:
         p.Get(r.K)
@@ -326,7 +332,7 @@ func (r *Row) Get(p redis.Pipeliner) {
     }
 }
 
-func (r *Row) ParseValue(cmder redis.Cmder) (obj interface{}, err error) {
+func ParseValue(cmder redis.Cmder) (obj interface{}, err error) {
     commandString := ""
     defer func() {
         if err != nil {
@@ -549,7 +555,7 @@ func (rs Rows) Types(client *redis.Client) (err error) {
     return nil
 }
 
-func (rs Rows) MGet(client *redis.Client) error {
+func (rs Rows) MGet(client *redis.Client, checkLargeObj bool) error {
     if len(rs) == 0 {
         return nil
     }
@@ -559,6 +565,13 @@ func (rs Rows) MGet(client *redis.Client) error {
             return err
         }
     }
+    if checkLargeObj {
+        if err := rs.MCard(client); err != nil {
+            log.Errorf("[MGet] MCard failed: '%v'", err)
+            return err
+        }
+    }
+
     // TODO ignore wrong types error
     p := client.Pipeline()
     for _, row := range rs {
@@ -570,7 +583,11 @@ func (rs Rows) MGet(client *redis.Client) error {
         return cmdErr
     }
     for idx, cmder := range cmders {
-        val, err := rs[idx].ParseValue(cmder)
+        if _, ok := cmder.(*redis.StatusCmd); ok {
+            rs[idx].V = nil
+            continue
+        }
+        val, err := ParseValue(cmder)
         if err != nil {
             return err
         }
@@ -615,9 +632,9 @@ func (rs Rows) MDiff(client *redis.Client) error {
     return nil
 }
 
-func (rs Rows) MGetWithRetry(client *redis.Client, maxRetry int) error {
+func (rs Rows) MGetWithRetry(client *redis.Client, checkLargeObj bool, maxRetry int) error {
     for i := 1; ; i++ {
-        if err := rs.MGet( client); err != nil {
+        if err := rs.MGet(client, checkLargeObj); err != nil {
             if i >= maxRetry {
                 log.Errorf("MGet failed: '%v' after retried for %d times", err, maxRetry)
                 return err
@@ -731,7 +748,7 @@ func (rs Rows) MCard(target *redis.Client) error {
             return err
         }
         if card > math.MaxInt32 {
-            panic(fmt.Sprintf("card(%d) > math.MaxInt32", card))
+            return errors.Errorf("card(%d) > math.MaxInt32", card)
         }
         rs[idx].Cardinality = int(card)
     }
