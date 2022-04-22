@@ -591,7 +591,7 @@ func (rs Rows) MGet(client *redis.Client, checkLargeObj bool) error {
     return nil
 }
 
-func (rs Rows) MDiff(client *redis.Client) error {
+func (rs Rows) MDiff(client *redis.Client, rewriteCard bool) error {
     if len(rs) == 0 {
         return nil
     }
@@ -619,6 +619,9 @@ func (rs Rows) MDiff(client *redis.Client) error {
                 K:     rs[idx].K,
                 Mine:  rs[idx].Cardinality,
                 Other: int(card),
+            }
+            if rewriteCard {
+                rs[idx].Cardinality = int(card)
             }
         }
     }
@@ -819,7 +822,7 @@ func DiffAsync(input <-chan Rows, readerCount, writerCount int,
 
             for rows := range input {
                 if err := utils.ExecWithRetry(func() error {
-                    return rows.MCard(srcClient)
+                    return rows.MCard(targetClient)
                 }, maxRetry, retryInterval, isRetryableErr); err != nil {
                     atomic.AddInt64(failedReadBatches, 1)
                     log.Errorf("[DiffAsync][Manual] MCard failed: %v, keys: %v", err, rows.Keys())
@@ -849,7 +852,7 @@ func DiffAsync(input <-chan Rows, readerCount, writerCount int,
 
             for rows := range rowsRead {
                 if err := utils.ExecWithRetry(func() error {
-                    return rows.MDiff(targetClient)
+                    return rows.MDiff(srcClient, true)
                 }, maxRetry, retryInterval, isRetryableErr); err != nil {
                     atomic.AddInt64(failedWriteBatches, 1)
                     log.Errorf("[DiffAsync][Manual] MDiff failed: '%v' keys: %v", err, rows.Keys())
