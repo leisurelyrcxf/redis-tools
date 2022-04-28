@@ -311,8 +311,12 @@ type Row struct {
     Cardinality                 int64
 }
 
+func (r *Row) IsBigKey(largeObjCard int64) bool {
+    return r.T != RedisTypeString && r.Cardinality >= largeObjCard
+}
+
 func (r *Row) Get(p redis.Pipeliner, largeObjCard int64) {
-    if r.T != RedisTypeString && r.Cardinality >= largeObjCard {
+    if r.IsBigKey(largeObjCard) {
         p.Ping()
         return
     }
@@ -731,7 +735,7 @@ func (rs Rows) MGet(client *redis.Client, checkLargeObj bool, largeObjCard int64
     }
     for idx, cmder := range cmders {
         if _, ok := cmder.(*redis.StatusCmd); ok {
-            log.Warnf("Detected large object: %s(%d)", rs[idx].K, rs[idx].Cardinality)
+            log.Warnf("Skipped large key: %s(Card: %d, Type: %s)", rs[idx].K, rs[idx].Cardinality, rs[idx].T)
             rs[idx].V = nil
             continue
         }

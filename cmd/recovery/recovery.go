@@ -88,7 +88,7 @@ func migrateAsync(input <-chan cmd.Rows, readerCount, smallKeyWriterCount, large
 
             for rows := range input {
                 large, small := rows.Filter(func(row *cmd.Row) bool {
-                    return row.Cardinality >= largeObjCard
+                    return row.IsBigKey(largeObjCard)
                 })
 
                 largeKeyRows <- large
