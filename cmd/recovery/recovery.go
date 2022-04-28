@@ -20,7 +20,7 @@ const (
 )
 
 func main()  {
-    c := common.Flags()
+    c := common.Flags("recovery redis keys (only recover different keys)", true)
     notLogExistedKeys := flag.Bool("not-log-existed-keys", false, "not log existed keys")
     largeObjCard := flag.Int64("large-obj-card", 6000000, "large obj card")
     overwriteExistedKeys := flag.Bool("overwrite", false, "overwrite existed keys")

@@ -1,13 +1,11 @@
 package main
 
 import (
-    "flag"
-    "net"
+    "github.com/leisurelyrcxf/redis-tools/cmd/common"
     "sync"
     "sync/atomic"
     "time"
 
-    "github.com/go-redis/redis"
     log "github.com/sirupsen/logrus"
 
     "github.com/leisurelyrcxf/redis-tools/cmd"
@@ -15,40 +13,19 @@ import (
 )
 
 func main()  {
-    maxSlotNum := flag.Int("max-slot-num", 0, "max slot number")
-    slotsDesc := flag.String("slots",  "-1,-2", "slots")
-    sourceAddr := flag.String("addr", "", "source addr")
-    batchSize := flag.Int("batch-size", 100, "batch size")
-    writerCount := flag.Int("writer", 4, "reader count")
-    maxBuffered := flag.Int("max-buffered", 1024, "max buffered batch size")
-
-    flag.Parse()
-    var slots = utils.ParseSlots(*maxSlotNum, *slotsDesc)
-    if *sourceAddr == "" {
-        log.Fatalf("source addr not provided")
-    }
-    if _, _, err := net.SplitHostPort(*sourceAddr); err != nil {
-        log.Fatalf("source addr not valid: %v", err)
-    }
-    log.Infof("flushdb of %s", *sourceAddr)
+    c := common.Flags("flushdb", false)
+    c.Parse()
 
     var (
-        srcClient = redis.NewClient(&redis.Options{
-            Network:            "tcp",
-            Addr:               *sourceAddr,
-            DialTimeout:        120*time.Second,
-            ReadTimeout:        120*time.Second,
-            WriteTimeout:       120*time.Second,
-            IdleCheckFrequency: time.Second*10,
-        })
-
         writerWg sync.WaitGroup
-
-        rawRowsCh                                  = make(chan cmd.Rows, *maxBuffered)
+        rawRowsCh                                  = make(chan cmd.Rows, c.MaxBuffered)
         successfulWriteBatches, failedWriteBatches int64
     )
 
-    for i := 0; i < *writerCount; i++ {
+    var scannedBatches int64
+    c.ScanSlotsAsync(&scannedBatches, rawRowsCh)
+
+    for i := 0; i < c.WriterCount; i++ {
         writerWg.Add(1)
 
         go func() {
@@ -56,7 +33,7 @@ func main()  {
 
             for rows := range rawRowsCh {
                 if err := utils.ExecWithRetryRedis(func() error {
-                    return rows.MDel(srcClient)
+                    return rows.MDel(c.SrcClient)
                 }, 10, time.Second); err != nil {
                     atomic.AddInt64(&failedWriteBatches, 1)
                     log.Fatalf("[Manual] Read failed: %v @round %d, keys: %v", err, i, rows.Keys())
@@ -68,8 +45,6 @@ func main()  {
         }()
     }
 
-    var scannedBatches int64
-    cmd.ScanSlotsAsync(srcClient, slots, *batchSize, 10, time.Second, &scannedBatches, rawRowsCh)
     writerWg.Wait()
 
     if failedWriteBatches == 0 {

@@ -1,77 +1,27 @@
 package main
 
 import (
-    "flag"
+    "github.com/leisurelyrcxf/redis-tools/cmd/common"
     "github.com/leisurelyrcxf/redis-tools/cmd/utils"
-    "io"
-    "net"
     "os"
     "strings"
     "sync"
     "sync/atomic"
     "time"
 
-    "github.com/go-redis/redis"
     "github.com/leisurelyrcxf/redis-tools/cmd"
     log "github.com/sirupsen/logrus"
 )
 
 func main()  {
-    maxSlotNum := flag.Int("max-slot-num", 0, "max slot number")
-    slotsDesc := flag.String("slots",  "-1,-2", "slots")
-    addr := flag.String("addr", "", "addr")
-    slot := flag.Int("slot", -1, "slot")
-    logLevel := flag.String("log-level", "error", "log level, can be 'panic', 'error', 'fatal', 'warn', 'info'")
-
-    flag.Parse()
-    var slots = utils.ParseSlots(*maxSlotNum, *slotsDesc)
-    if *addr == "" {
-        log.Fatalf("source addr not provided")
-    }
-    if _, _, err := net.SplitHostPort(*addr); err != nil {
-        log.Fatalf("source addr not valid: %v", err)
-    }
-    if *maxSlotNum == 0 && *slot == -1 {
-        log.Fatalf("max slot number is 0 && slot == 0")
-    }
-    if *maxSlotNum != 0 {
-        log.Infof("find key of all slots[0, %d) of %s", *maxSlotNum, *addr)
-    } else {
-        log.Infof("find key of slot %d of %s", *slot, *addr)
-    }
-    lvl, err := log.ParseLevel(*logLevel)
-    if err != nil {
-        log.Fatalf("invalid log level: '%v'", err)
-    }
-    log.SetLevel(lvl)
-
-    var (
-        cli = redis.NewClient(&redis.Options{
-            Network:            "tcp",
-            Addr:               *addr,
-            DialTimeout:        240*time.Second,
-            ReadTimeout:        240*time.Second,
-            WriteTimeout:       240*time.Second,
-            PoolSize:50,
-            IdleCheckFrequency: time.Second*10,
-        })
-    )
-
-    const batchSize = 50
+    c := common.Flags("find key which satisfies certain critera", false)
+    c.Parse()
 
     var (
         readerWg sync.WaitGroup
-        maxBuffered = 10000
-        rawRowsCh       = make(chan cmd.Rows, maxBuffered)
+        rawRowsCh       = make(chan cmd.Rows, c.MaxBuffered)
 
         successfulReadBatches,  failedReadBatches int64
-        maxRetry = 10
-
-        isRetryableErr = func(err error) bool {
-            return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
-        }
-        retryInterval = time.Second * 10
-        readerCount = 30
 
         keys = make([]string, 0, 100000)
         keyMutex sync.Mutex
@@ -89,7 +39,10 @@ func main()  {
         }
     )
 
-    for i := 0; i < readerCount; i++ {
+    var scannedBatches int64
+    c.ScanSlotsAsync(&scannedBatches, rawRowsCh)
+
+    for i := 0; i < c.ReaderCount; i++ {
         readerWg.Add(1)
 
         go func() {
@@ -97,14 +50,14 @@ func main()  {
 
             for rows := range rawRowsCh {
                 for i := 0; ; i++ {
-                    if err := rows.Types(cli); err != nil {
-                        if i >= maxRetry- 1 || !isRetryableErr(err) {
+                    if err := rows.Types(c.SrcClient); err != nil {
+                        if i >= common.DefaultMaxRetry - 1 || !utils.IsRetryableRedisErr(err) {
                             atomic.AddInt64(&failedReadBatches, 1)
                             log.Errorf("[Manual] Read failed: %v @round %d, keys: %v", err, i, rows.Keys())
                             break
                         }
-                        log.Warnf("Read failed: '%v' @round %d, retrying in %s...", err, i, retryInterval)
-                        time.Sleep(retryInterval)
+                        log.Warnf("Read failed: '%v' @round %d, retrying in %s...", err, i, common.DefaultRetryInterval)
+                        time.Sleep(common.DefaultRetryInterval)
                         continue
                     }
                     tmp := atomic.AddInt64(&successfulReadBatches, 1)
@@ -123,8 +76,6 @@ func main()  {
         }()
     }
 
-    var scannedBatches int64
-    cmd.ScanSlotsAsync(cli, slots, batchSize, maxRetry, retryInterval, &scannedBatches, rawRowsCh)
     readerWg.Wait()
     for _, key := range keys {
         println(key)

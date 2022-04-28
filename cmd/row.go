@@ -124,9 +124,7 @@ func ScanSlotsRawAsync(cli *redis.Client, slots []int, typ RedisType, overwriteE
         "Data type: '%s'\n" +
         "Overwrite existed keys: %v", slots, typ, overwriteExistedKeys)
     go func () {
-        defer func() {
-            close(scannedRows)
-        }()
+        defer close(scannedRows)
 
         for _, slot := range slots {
             var cursorID = 0
@@ -561,18 +559,18 @@ func (r *Row) MigrateLargeKey(src *redis.Client, target *redis.Client, batchSize
                     utils.Assert(err != nil || num <= int64(len(fields)))
                     return err
                 }, maxRetry, retryInterval); err != nil {
-                    log.Errorf("SAdd for key '%s' failed: %v", r.K, err)
+                    log.Errorf("SAdd for big key '%s' failed: %v", r.K, err)
                     return err
                 }
             }
 
             if newCursorID == 0 {
-                log.Warningf("SScan iterated all fields for key '%s'", r.K)
+                log.Warningf("SScan iterated all fields for big key '%s'", r.K)
                 break
             }
 
             if round%1000 == 0 {
-                log.Warningf("SScan iterated roughly %d fields for key '%s'", round*batchSize, r.K)
+                log.Warningf("SScan iterated roughly %d fields for big key '%s'", round*batchSize, r.K)
             }
 
             cursorID = newCursorID
@@ -602,18 +600,18 @@ func (r *Row) MigrateLargeKey(src *redis.Client, target *redis.Client, batchSize
                 if err := utils.ExecWithRetryRedis(func() error {
                     return target.HMSet(r.K, ret).Err()
                 }, maxRetry, retryInterval); err != nil {
-                    log.Errorf("HMSet for key '%s' failed: %v", r.K, err)
+                    log.Errorf("HMSet for big key '%s' failed: %v", r.K, err)
                     return err
                 }
             }
 
             if newCursorID == 0 {
-                log.Warningf("HScan migrated all fields for key '%s'", r.K)
+                log.Warningf("HScan migrated all fields for big key '%s'", r.K)
                 break
             }
 
             if round%1000 == 0 {
-                log.Warningf("HScan iterated roughly %d fields for key '%s'", round*batchSize, r.K)
+                log.Warningf("HScan iterated roughly %d fields for big key '%s'", round*batchSize, r.K)
             }
 
             cursorID = newCursorID
@@ -643,18 +641,18 @@ func (r *Row) MigrateLargeKey(src *redis.Client, target *redis.Client, batchSize
                 if err := utils.ExecWithRetryRedis(func() error {
                     return target.ZAdd(r.K, zs...).Err()
                 }, maxRetry, retryInterval); err != nil {
-                    log.Errorf("ZAdd for key '%s' failed: %v", r.K, err)
+                    log.Errorf("ZAdd for big key '%s' failed: %v", r.K, err)
                     return err
                 }
             }
 
             if newCursorID == 0 {
-                log.Warningf("ZScan migrated all fields for key '%s'", r.K)
+                log.Warningf("ZScan migrated all fields for big key '%s'", r.K)
                 break
             }
 
             if round%1000 == 0 {
-                log.Warningf("ZScan iterated roughly %d fields for key '%s'", round*batchSize, r.K)
+                log.Warningf("ZScan iterated roughly %d fields for big key '%s'", round*batchSize, r.K)
             }
 
             cursorID = newCursorID
@@ -783,21 +781,6 @@ func (rs Rows) MDiff(client *redis.Client, replaceCard bool) error {
     return nil
 }
 
-func (rs Rows) MGetWithRetry(client *redis.Client, checkLargeObj bool, largeObjCard int64, maxRetry int) error {
-    for i := 1; ; i++ {
-        if err := rs.MGet(client, checkLargeObj, largeObjCard); err != nil {
-            if i >= maxRetry {
-                log.Errorf("MGet failed: '%v' after retried for %d times", err, maxRetry)
-                return err
-            }
-            log.Warningf("MGet failed: '%v', retry in 1s...", err)
-            time.Sleep(time.Second)
-            continue
-        }
-        return nil
-    }
-}
-
 func (rs Rows) MSet(target *redis.Client, pipelineCap int, logExistedKey bool) error {
     if len(rs) == 0 {
         return nil
@@ -829,21 +812,6 @@ func (rs Rows) MSet(target *redis.Client, pipelineCap int, logExistedKey bool) e
         }
     }
     return p.Exec()
-}
-
-func (rs Rows) MSetWithRetry(client *redis.Client, pipeCap int, notLogExistedKeys bool, maxRetry int) error {
-    for i := 1; ; i++ {
-        if err := rs.MSet(client, pipeCap, notLogExistedKeys); err != nil {
-            if i >= maxRetry {
-                log.Errorf("MSet failed: '%v' after retried for %d times", err, maxRetry)
-                return err
-            }
-            log.Infof("MSet failed: '%v', retry in 1s...", err)
-            time.Sleep(time.Second)
-            continue
-        }
-        return nil
-    }
 }
 
 func (rs Rows) MDel(target *redis.Client) error {

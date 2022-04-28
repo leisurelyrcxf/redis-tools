@@ -2,13 +2,16 @@ package utils
 
 import (
     "fmt"
-    "github.com/go-redis/redis"
     "io"
+    "runtime"
     "strconv"
     "strings"
     "time"
 
+    "github.com/go-redis/redis"
     log "github.com/sirupsen/logrus"
+
+    "github.com/leisurelyrcxf/redis-tools/versioninfo"
 )
 
 type alsoOutputStd struct {
@@ -155,4 +158,30 @@ func ExecWithRetry(exec func() error, maxRetry int, retryInterval time.Duration,
 
 func IsRetryableRedisErr(err error) bool {
     return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
+}
+
+// Version shows version thing
+func Version() string {
+    return versionString(
+        versioninfo.VERSION,
+        versioninfo.REVISION,
+        versioninfo.BUILTAT,
+    )
+}
+
+func versionString(ver, rev, buildAt string) string {
+    version := ""
+    version += fmt.Sprintf("Version:        %s\n", ver)
+    version += fmt.Sprintf("Git hash:       %s\n", rev)
+    version += fmt.Sprintf("Built:          %s\n", buildAt)
+    version += fmt.Sprintf("Runtime go version: %s\n", runtime.Version())
+    version += fmt.Sprintf("OS/Arch:        %s/%s\n", runtime.GOOS, runtime.GOARCH)
+    return version
+}
+
+func Ternary(b bool, str1, str2 string) string {
+    if b {
+        return str1
+    }
+    return str2
 }

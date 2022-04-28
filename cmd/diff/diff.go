@@ -19,7 +19,7 @@ const (
 )
 
 func main()  {
-    c := common.Flags()
+    c := common.Flags("Diff all keys by cardinality", true)
     outputFileName := flag.String("output", "compare-result", "output file name")
     outputToStd := flag.Bool("output-to-std", false, "output to std")
 
@@ -42,9 +42,9 @@ func main()  {
 
     var (
         input  = make(chan cmd.Rows, c.MaxBuffered)
+        scannedBatches, successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches, diffBatches int64
     )
-    var scannedBatches, successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches, diffBatches int64
-    cmd.ScanSlotsAsync(c.SrcClient, c.Slots, c.BatchSize, maxRetry, retryInterval, &scannedBatches, input)
+    c.ScanSlotsAsync(&scannedBatches, input)
     output := cmd.DiffAsync(input, c.ReaderCount, c.WriterCount, c.SrcClient, c.TargetClient, c.MaxBuffered, maxRetry, retryInterval,
         &successfulReadBatches, &failedReadBatches, &successfulWriteBatches, &failedWriteBatches, &diffBatches)
 

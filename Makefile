@@ -1,6 +1,7 @@
-.PHONY: deps build binary
+.PHONY: deps build
 
-REPO_PATH := recovery
+.DEFAULT_GOAL := build
+REPO_PATH := github.com/leisurelyrcxf/redis-tools
 REVISION := $(shell git rev-parse HEAD || unknown)
 BUILTAT := $(shell date +%Y-%m-%dT%H:%M:%S)
 VERSION := $(shell git describe --tags $(shell git rev-list --tags --max-count=1))
@@ -34,27 +35,32 @@ redis-recovery:
 redis-diff:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o redis-diff ./cmd/diff
 
-cleanup:
-	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o cleanup ./cmd/cleanup
+redis-find-empty:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o redis-find-empty ./cmd/findempty
 
-flushdb:
-	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o flushall ./cmd/flushdb
+redis-flushdb:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o redis-flushall ./cmd/flushdb
 
-find-key:
-	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o find-key ./cmd/findkeys
+redis-find-key:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o redis-find-key ./cmd/findkeys
 
-perf:
-	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o hperf ./cmd/perf
+redis-perf:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o redis-perf ./cmd/perf
 
 redis-analysis:
 	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o redis-analysis ./cmd/analysis
 
-fill-redis:
-	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o fill-redis ./cmd/fill
+redis-fill:
+	go build -ldflags "$(GO_LDFLAGS)" -a -tags "netgo osusergo" -installsuffix netgo -o redis-fill ./cmd/fill
 
-binary: recovery flushdb cleanup analysis fill-redis
+binary: redis-recovery redis-diff redis-find-empty redis-flushdb redis-find-key redis-perf redis-analysis redis-fill
 
-build: deps binary
+build: binary
+
+recover: redis-recovery redis-diff
+
+clean:
+	rm -f redis-*
 
 unit-test:
 	go vet `go list ./... | grep -v '/vendor/' | grep -v '/tools'`

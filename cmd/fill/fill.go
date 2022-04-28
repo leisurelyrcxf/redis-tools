@@ -10,7 +10,10 @@ import (
 	"github.com/go-redis/redis"
 	"github.com/golang/glog"
 	"github.com/leisurelyrcxf/redis-tools/cmd"
+	"github.com/leisurelyrcxf/redis-tools/cmd/common"
+	"github.com/leisurelyrcxf/redis-tools/cmd/utils"
 	"github.com/leisurelyrcxf/redis-tools/versioninfo"
+	log "github.com/sirupsen/logrus"
 	"go.uber.org/atomic"
 	"math"
 	"math/rand"
@@ -153,7 +156,10 @@ func (t *Task) GetErrCount() int64 {
 }
 
 func (t *Task) Verify(ctx context.Context, cli *redis.Client) {
-	if err := t.Rows.MGetWithRetry( cli, false, 10); err != nil {
+	if err := utils.ExecWithRetryRedis(func() error {
+		return t.Rows.MGet(cli, false, math.MaxInt64)
+	}, common.DefaultMaxRetry, common.DefaultRetryInterval); err != nil {
+		log.Errorf("MGet failed: '%v'", err)
 		t.Finish(len(t.Rows))
 		return
 	}
@@ -168,12 +174,14 @@ func (t *Task) Verify(ctx context.Context, cli *redis.Client) {
 }
 
 func (t *Task) Write(ctx context.Context, cli *redis.Client) {
-	err := t.Rows.MSetWithRetry(cli, len(t.Rows), true, 10)
-	var errCount int
-	if err != nil {
-		errCount = len(t.Rows)
+	if err := utils.ExecWithRetryRedis(func() error {
+		return t.Rows.MSet(cli, len(t.Rows), true)
+	}, common.DefaultMaxRetry, common.DefaultRetryInterval); err != nil {
+		log.Errorf("MSet failed: '%v'", err)
+		t.Finish(len(t.Rows))
+		return
 	}
-	t.Finish(errCount)
+	t.Finish(0)
 }
 
 func (t *Task) getValue(key string) interface{} {
