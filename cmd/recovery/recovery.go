@@ -22,9 +22,9 @@ const (
 func main()  {
     c := common.Flags()
     notLogExistedKeys := flag.Bool("not-log-existed-keys", false, "not log existed keys")
-    overwriteExistedKeys := flag.Bool("overwrite", false, "overwrite existed keys")
-    delTargetKeyFirstBeforeOverwrite := flag.Bool("del-target-key-before-overwrite", false, "delete target key first when overwrite")
     largeObjCard := flag.Int64("large-obj-card", 6000000, "large obj card")
+    overwriteExistedKeys := flag.Bool("overwrite", false, "overwrite existed keys")
+    delTargetKeyBeforeOverwrite := flag.Bool("del-target-key-before-overwrite", false, "delete target key first when overwrite")
 
     c.Parse()
     var (
@@ -32,7 +32,7 @@ func main()  {
     )
     var scannedBatches, diffOKReadBatches, diffFailedReadBatches, diffOKWriteBatches, diffFailedWriteBatches, diffBatches int64
     cmd.ScanSlotsRawAsync(c.SrcClient, c.Slots, c.RedisType,
-        *overwriteExistedKeys, *delTargetKeyFirstBeforeOverwrite,
+        *overwriteExistedKeys, *delTargetKeyBeforeOverwrite,
         c.BatchSize, maxRetry, retryInterval, &scannedBatches, input)
     diffCh := cmd.DiffAsync(input, c.ReaderCount, c.WriterCount, c.SrcClient, c.TargetClient, c.MaxBuffered, maxRetry, retryInterval,
         &diffOKReadBatches, &diffFailedReadBatches, &diffOKWriteBatches, &diffFailedWriteBatches, &diffBatches)
@@ -69,14 +69,14 @@ func main()  {
     }
 }
 
-func migrateAsync(input <-chan cmd.Rows, readerCount, writerCount, largeKeyWorkerCount int,
+func migrateAsync(input <-chan cmd.Rows, readerCount, smallKeyWriterCount, largeKeyWriterCount int,
     srcClient *redis.Client, targetClient *redis.Client,
     maxBuffered int, batchSize int, logExistedKeys bool, largeObjCard int64,
     successfulReadBatches, failedReadBatches, successfulWriteBatches, failedWriteBatches *int64) (done chan struct{}) {
     done = make(chan struct{})
     var (
-        readerWg sync.WaitGroup
-        rowsRead = make(chan cmd.Rows, maxBuffered)
+        readerWg     sync.WaitGroup
+        smallKeyRows = make(chan cmd.Rows, maxBuffered)
         largeKeyRows = make(chan cmd.Rows, 1024*1024) // Since large key rows don't hold any data, thus the channel buffer can be much bigger.
     )
 
@@ -99,7 +99,7 @@ func migrateAsync(input <-chan cmd.Rows, readerCount, writerCount, largeKeyWorke
                     atomic.AddInt64(failedReadBatches, 1)
                     log.Errorf("[migrateAsync][Manual] Read failed: %v, keys: %v", err, small.Keys())
                 } else {
-                    rowsRead <- small
+                    smallKeyRows <- small
                     tmp := atomic.AddInt64(successfulReadBatches, 1)
                     log.Infof("[migrateAsync] Read %d batches successfully", tmp)
                 }
@@ -109,22 +109,22 @@ func migrateAsync(input <-chan cmd.Rows, readerCount, writerCount, largeKeyWorke
 
     go func() {
         readerWg.Wait()
-        log.Infof("all readers finished, close rowsRead")
-        close(rowsRead)
+        log.Infof("all readers finished, close smallKeyRows")
+        close(smallKeyRows)
         close(largeKeyRows)
     }()
 
     var (
-        writerWg               sync.WaitGroup
-        largeKeyWorkerWg               sync.WaitGroup
+        smallKeyWriterWg sync.WaitGroup
+        largeKeyWriterWg sync.WaitGroup
     )
-    for i := 0; i < writerCount; i++ {
-        writerWg.Add(1)
+    for i := 0; i < smallKeyWriterCount; i++ {
+        smallKeyWriterWg.Add(1)
 
         go func() {
-            defer writerWg.Done()
+            defer smallKeyWriterWg.Done()
 
-            for rows := range rowsRead {
+            for rows := range smallKeyRows {
                 if err := utils.ExecWithRetryRedis(func() error {
                     return rows.MSet(targetClient, batchSize, logExistedKeys)
                 }, maxRetry, retryInterval); err != nil {
@@ -138,15 +138,15 @@ func migrateAsync(input <-chan cmd.Rows, readerCount, writerCount, largeKeyWorke
         }()
     }
 
-    for i := 0; i < largeKeyWorkerCount; i++ {
-        largeKeyWorkerWg.Add(1)
+    for i := 0; i < largeKeyWriterCount; i++ {
+        largeKeyWriterWg.Add(1)
 
         go func() {
-            defer largeKeyWorkerWg.Done()
+            defer largeKeyWriterWg.Done()
 
             for rows := range largeKeyRows {
                 for _, row := range rows {
-                    if err := row.Migrate(srcClient, targetClient, batchSize, logExistedKeys, maxRetry, retryInterval); err != nil {
+                    if err := row.MigrateLargeKey(srcClient, targetClient, batchSize, logExistedKeys, maxRetry, retryInterval); err != nil {
                         log.Errorf("migrate large key '%s' failed: '%v'", row.K, err)
                     }
                 }
@@ -156,8 +156,8 @@ func migrateAsync(input <-chan cmd.Rows, readerCount, writerCount, largeKeyWorke
 
 
     go func() {
-        writerWg.Wait()
-        largeKeyWorkerWg.Wait()
+        smallKeyWriterWg.Wait()
+        largeKeyWriterWg.Wait()
         close(done)
     }()
 

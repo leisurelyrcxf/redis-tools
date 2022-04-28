@@ -118,7 +118,7 @@ func ScanSlotsAsync(cli *redis.Client, slots []int,
     ScanSlotsRawAsync(cli, slots, RedisTypeUnknown, false, false, batchSize, maxRetry, retryInterval, scannedBatches, rawRowsCh)
 }
 
-func ScanSlotsRawAsync(cli *redis.Client, slots []int, typ RedisType, overwriteExistedKeys bool, delTargetKeyFirstBeforeOverwrite bool,
+func ScanSlotsRawAsync(cli *redis.Client, slots []int, typ RedisType, overwriteExistedKeys bool, delTargetKeyBeforeOverwrite bool,
     batchSize, maxRetry int, retryInterval time.Duration, scannedBatches *int64, scannedRows chan <-Rows) {
     log.Infof("Scan slots: %v\n" +
         "Data type: '%s'\n" +
@@ -138,7 +138,7 @@ func ScanSlotsRawAsync(cli *redis.Client, slots []int, typ RedisType, overwriteE
 
                 for i := 0; ; i++ {
                     var newCursorID int
-                    if rawRows, newCursorID, err = Scan(cli, slot, cursorID, batchSize, typ, overwriteExistedKeys, delTargetKeyFirstBeforeOverwrite); err != nil {
+                    if rawRows, newCursorID, err = Scan(cli, slot, cursorID, batchSize, typ, overwriteExistedKeys, delTargetKeyBeforeOverwrite); err != nil {
                         if i >= maxRetry-1 {
                             log.Errorf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
                             return
@@ -516,7 +516,7 @@ func (r *Row) IsValueEmpty() bool {
     }
 }
 
-func (r *Row) Migrate(src *redis.Client, target *redis.Client, batchSize int, logExistedKey bool,
+func (r *Row) MigrateLargeKey(src *redis.Client, target *redis.Client, batchSize int, logExistedKey bool,
     maxRetry int, retryInterval time.Duration) error {
     if !r.OverwriteExistedKeys {
         cmd := target.Exists(r.K)
@@ -574,6 +574,7 @@ func (r *Row) Migrate(src *redis.Client, target *redis.Client, batchSize int, lo
             if round%1000 == 0 {
                 log.Warningf("SScan iterated roughly %d fields for key '%s'", round*batchSize, r.K)
             }
+
             cursorID = newCursorID
         }
         return nil
@@ -614,6 +615,7 @@ func (r *Row) Migrate(src *redis.Client, target *redis.Client, batchSize int, lo
             if round%1000 == 0 {
                 log.Warningf("HScan iterated roughly %d fields for key '%s'", round*batchSize, r.K)
             }
+
             cursorID = newCursorID
         }
         return nil
@@ -654,11 +656,12 @@ func (r *Row) Migrate(src *redis.Client, target *redis.Client, batchSize int, lo
             if round%1000 == 0 {
                 log.Warningf("ZScan iterated roughly %d fields for key '%s'", round*batchSize, r.K)
             }
+
             cursorID = newCursorID
         }
         return nil
     default:
-        return fmt.Errorf("migrate key of type '%s' not supported", r.T)
+        return fmt.Errorf("migrate key '%s' of type '%s' not supported", r.K, r.T)
     }
 }
 
