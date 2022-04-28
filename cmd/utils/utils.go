@@ -2,6 +2,7 @@ package utils
 
 import (
     "fmt"
+    "github.com/go-redis/redis"
     "io"
     "strconv"
     "strings"
@@ -74,6 +75,69 @@ func ParseSlots(maxSlotNum int, slotsDesc string) []int {
     return slots
 }
 
+func CheckRedisConn(cli *redis.Client) error {
+    ret, err := cli.Ping().Result()
+    if err != nil {
+        return err
+    }
+    if ret != "PONG" {
+        return fmt.Errorf("not PONG")
+    }
+    return nil
+}
+
+func StringArray2ObjectArray(strings []string) []interface{} {
+    objects := make([]interface{}, len(strings))
+    for idx, fd := range strings {
+        objects[idx] = fd
+    }
+    return objects
+}
+
+func StringArray2HashMap(strings []string) (map[string]interface{}, error) {
+    if len(strings) & 1 == 1 {
+        return nil, fmt.Errorf("wrong result of hscan, odd string list")
+    }
+    m := make(map[string]interface{})
+    var key string
+    for _, fd := range strings {
+        if key != "" {
+            m[key] = fd
+            key = ""
+        } else {
+            key = fd
+        }
+    }
+    return m, nil
+}
+
+func StringArray2ZArray(strings []string) (result []redis.Z, err error) {
+    if len(strings) & 1 == 1 {
+        return nil, fmt.Errorf("wrong result of zscan, odd string list")
+    }
+    var member string
+    for _, fd := range strings {
+        if member != "" {
+            f, err := strconv.ParseFloat(fd, 64)
+            if err != nil {
+                return nil, err
+            }
+            result = append(result, redis.Z{
+                Score:  f,
+                Member: member,
+            })
+            member = ""
+        } else {
+            member = fd
+        }
+    }
+    return result, nil
+}
+
+func ExecWithRetryRedis(exec func()error, maxRetry int, retryInterval time.Duration) error {
+    return ExecWithRetry(exec, maxRetry, retryInterval, IsRetryableRedisErr)
+}
+
 func ExecWithRetry(exec func() error, maxRetry int, retryInterval time.Duration, isRetryableErr func(err error) bool) error {
     for i := 0; ; i++ {
         if err := exec(); err != nil {
@@ -87,4 +151,8 @@ func ExecWithRetry(exec func() error, maxRetry int, retryInterval time.Duration,
         break
     }
     return nil
+}
+
+func IsRetryableRedisErr(err error) bool {
+    return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
 }

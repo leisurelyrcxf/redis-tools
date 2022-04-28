@@ -79,7 +79,7 @@ func (p *Pipeline) Exec() error {
     return err
 }
 
-func Scan(cli *redis.Client, slot int, cursorId int, batchSize int, typ RedisType, overwriteExistedKeys bool) (rows Rows, newCid int, err error) {
+func Scan(cli *redis.Client, slot int, cursorId int, batchSize int, typ RedisType, overwriteExistedKeys, deleteTarget bool) (rows Rows, newCid int, err error) {
     result, err := cli.Do([]interface{}{"SLOTSSCAN", slot, cursorId, "count", batchSize}...).Result()
     if err != nil {
         return nil, 0, err
@@ -105,7 +105,9 @@ func Scan(cli *redis.Client, slot int, cursorId int, batchSize int, typ RedisTyp
         if !ok {
             return nil, -1, fmt.Errorf("key type not sring")
         }
-        rows = append(rows, &Row{K: key, T: typ, OverwriteExistedKeys: overwriteExistedKeys})
+        rows = append(rows, &Row{K: key, T: typ,
+            OverwriteExistedKeys: overwriteExistedKeys, DeleteTargetBeforeOverwrite: deleteTarget,
+            Cardinality: -1})
     }
 
     return rows, newCid, nil
@@ -113,10 +115,10 @@ func Scan(cli *redis.Client, slot int, cursorId int, batchSize int, typ RedisTyp
 
 func ScanSlotsAsync(cli *redis.Client, slots []int,
     batchSize, maxRetry int, retryInterval time.Duration, scannedBatches *int64, rawRowsCh chan <-Rows) {
-    ScanSlotsRawAsync(cli, slots, RedisTypeUnknown, false, batchSize, maxRetry, retryInterval, scannedBatches, rawRowsCh)
+    ScanSlotsRawAsync(cli, slots, RedisTypeUnknown, false, false, batchSize, maxRetry, retryInterval, scannedBatches, rawRowsCh)
 }
 
-func ScanSlotsRawAsync(cli *redis.Client, slots []int, typ RedisType, overwriteExistedKeys bool,
+func ScanSlotsRawAsync(cli *redis.Client, slots []int, typ RedisType, overwriteExistedKeys bool, delTargetKeyFirstBeforeOverwrite bool,
     batchSize, maxRetry int, retryInterval time.Duration, scannedBatches *int64, scannedRows chan <-Rows) {
     log.Infof("Scan slots: %v\n" +
         "Data type: '%s'\n" +
@@ -136,7 +138,7 @@ func ScanSlotsRawAsync(cli *redis.Client, slots []int, typ RedisType, overwriteE
 
                 for i := 0; ; i++ {
                     var newCursorID int
-                    if rawRows, newCursorID, err = Scan(cli, slot, cursorID, batchSize, typ, overwriteExistedKeys); err != nil {
+                    if rawRows, newCursorID, err = Scan(cli, slot, cursorID, batchSize, typ, overwriteExistedKeys, delTargetKeyFirstBeforeOverwrite); err != nil {
                         if i >= maxRetry-1 {
                             log.Errorf("scan cursor %d failed: '%v' @round %d", cursorID, err, i)
                             return
@@ -231,9 +233,9 @@ type Stat struct {
 func (es *Stat) collect(row *Row) {
     es.SumCard.Add( int64(row.Cardinality))
     es.KeyCount.Add(1)
-    if row.Cardinality > int(es.MaxCard.Get())  {
+    if row.Cardinality > es.MaxCard.Get()  {
         es.Lock()
-        if row.Cardinality > int(es.MaxCard.Get()) {
+        if row.Cardinality > es.MaxCard.Get() {
             es.MaxCard.Set(int64(row.Cardinality))
             es.MaxCardKey = row.K
         }
@@ -301,18 +303,19 @@ type Diff interface{
 }
 
 type Row struct {
-    K                    string
-    T                    RedisType
-    OverwriteExistedKeys bool
-    V                    interface{} // string, map[string]string, []redis.Z
-    D                    Diff
-    TargetNotExists      bool
-    Cardinality          int
+    K                           string
+    T                           RedisType
+    OverwriteExistedKeys        bool
+    DeleteTargetBeforeOverwrite bool
+    V                           interface{} // string, map[string]string, []redis.Z
+    D                           Diff
+    TargetNotExists             bool
+    Cardinality                 int64
 }
 
-func (r *Row) Get(p redis.Pipeliner) {
-    if r.Cardinality > 6000000 {
-        p.Ping() // Placeholder, TODO impl for big obj
+func (r *Row) Get(p redis.Pipeliner, largeObjCard int64) {
+    if r.T != RedisTypeString && r.Cardinality >= largeObjCard {
+        p.Ping()
         return
     }
 
@@ -370,7 +373,7 @@ func (s *StringDiff) Output(w io.StringWriter) error {
 
 type CardDiff struct {
     K string
-    Mine, Other int
+    Mine, Other int64
 }
 
 func (s *CardDiff) Output(w io.StringWriter) error {
@@ -389,7 +392,7 @@ func (r *Row) CalcDiff(val interface{}) Diff {
             }
         }
     case RedisTypeList, RedisTypeSet:
-        if card := len(val.([]string)); r.Cardinality != card {
+        if card := int64(len(val.([]string))); r.Cardinality != card {
             return &CardDiff{
                 K: r.K,
                 Mine: r.Cardinality,
@@ -397,7 +400,7 @@ func (r *Row) CalcDiff(val interface{}) Diff {
             }
         }
     case RedisTypeHash:
-        if card := len(val.(map[string]string)); r.Cardinality != card {
+        if card := int64(len(val.(map[string]string))); r.Cardinality != card {
             return &CardDiff{
                 K: r.K,
                 Mine: r.Cardinality,
@@ -405,7 +408,7 @@ func (r *Row) CalcDiff(val interface{}) Diff {
             }
         }
     case RedisTypeZset:
-        if card := len(val.([]redis.Z)); r.Cardinality != card {
+        if card := int64(len(val.([]redis.Z))); r.Cardinality != card {
             return &CardDiff{
                 K: r.K,
                 Mine: r.Cardinality,
@@ -513,6 +516,152 @@ func (r *Row) IsValueEmpty() bool {
     }
 }
 
+func (r *Row) Migrate(src *redis.Client, target *redis.Client, batchSize int, logExistedKey bool,
+    maxRetry int, retryInterval time.Duration) error {
+    if !r.OverwriteExistedKeys {
+        cmd := target.Exists(r.K)
+        existsVal, err := cmd.Result()
+        if err != nil {
+            return errors.Errorf("cmd '%s' failed: %v", cmd.String(), err)
+        }
+        if r.TargetNotExists = existsVal == 0; !r.TargetNotExists {
+            if logExistedKey {
+                log.Warnf("skip existed key %s", r.K)
+            }
+            return nil
+        }
+    } else if r.DeleteTargetBeforeOverwrite {
+        if err := utils.ExecWithRetryRedis(func() error {
+            return target.Del(r.K).Err()
+        }, maxRetry, retryInterval); err != nil {
+            log.Errorf("delete key '%s' failed: %v", r.K, err)
+            return err
+        }
+    }
+
+    switch r.T {
+    case RedisTypeSet:
+        var cursorID = uint64(0)
+        for round := 0; ; round++ {
+            var (
+                fields    []string
+                newCursorID uint64
+            )
+            if err := utils.ExecWithRetryRedis(func() (err error) {
+                fields, newCursorID, err = src.SScan(r.K, cursorID, "", int64(batchSize)).Result()
+                return err
+            }, maxRetry, retryInterval); err != nil {
+                log.Errorf("SScan key '%s' cursor: %d failed: '%v'", r.K, cursorID, err)
+                return err
+            }
+
+            if len(fields) > 0 {
+                if err := utils.ExecWithRetryRedis(func() error {
+                    num, err := target.SAdd(r.K, utils.StringArray2ObjectArray(fields)...).Result()
+                    utils.Assert(err != nil || num <= int64(len(fields)))
+                    return err
+                }, maxRetry, retryInterval); err != nil {
+                    log.Errorf("SAdd for key '%s' failed: %v", r.K, err)
+                    return err
+                }
+            }
+
+            if newCursorID == 0 {
+                log.Warningf("SScan iterated all fields for key '%s'", r.K)
+                break
+            }
+
+            if round%1000 == 0 {
+                log.Warningf("SScan iterated roughly %d fields for key '%s'", round*batchSize, r.K)
+            }
+            cursorID = newCursorID
+        }
+        return nil
+    case RedisTypeHash:
+        var cursorID = uint64(0)
+        for round := 0; ; round++ {
+            var (
+                fields    []string
+                newCursorID uint64
+            )
+            if err := utils.ExecWithRetryRedis(func() (err error) {
+                fields, newCursorID, err = src.HScan(r.K, cursorID, "", int64(batchSize)).Result()
+                return err
+            }, maxRetry, retryInterval); err != nil {
+                log.Errorf("HScan key '%s' cursor: %d failed: '%v'", r.K, cursorID, err)
+                return err
+            }
+
+            if len(fields) > 0 {
+                ret, err := utils.StringArray2HashMap(fields)
+                if err != nil {
+                    log.Errorf("HScan key '%s' return invalid scan results: %v", r.K, fields)
+                    return err
+                }
+                if err := utils.ExecWithRetryRedis(func() error {
+                    return target.HMSet(r.K, ret).Err()
+                }, maxRetry, retryInterval); err != nil {
+                    log.Errorf("HMSet for key '%s' failed: %v", r.K, err)
+                    return err
+                }
+            }
+
+            if newCursorID == 0 {
+                log.Warningf("HScan migrated all fields for key '%s'", r.K)
+                break
+            }
+
+            if round%1000 == 0 {
+                log.Warningf("HScan iterated roughly %d fields for key '%s'", round*batchSize, r.K)
+            }
+            cursorID = newCursorID
+        }
+        return nil
+    case RedisTypeZset:
+        var cursorID = uint64(0)
+        for round := 0; ; round++ {
+            var (
+                fields    []string
+                newCursorID uint64
+            )
+            if err := utils.ExecWithRetryRedis(func() (err error) {
+                fields, newCursorID, err = src.ZScan(r.K, cursorID, "", int64(batchSize)).Result()
+                return err
+            }, maxRetry, retryInterval); err != nil {
+                log.Errorf("ZScan key '%s' cursor: %d failed: '%v'", r.K, cursorID, err)
+                return err
+            }
+
+            if len(fields) > 0 {
+                zs, err := utils.StringArray2ZArray(fields)
+                if err != nil {
+                    log.Errorf("ZScan key '%s' return invalid scan results: err: '%v', results: %v", r.K, err, fields)
+                    return err
+                }
+                if err := utils.ExecWithRetryRedis(func() error {
+                    return target.ZAdd(r.K, zs...).Err()
+                }, maxRetry, retryInterval); err != nil {
+                    log.Errorf("ZAdd for key '%s' failed: %v", r.K, err)
+                    return err
+                }
+            }
+
+            if newCursorID == 0 {
+                log.Warningf("ZScan migrated all fields for key '%s'", r.K)
+                break
+            }
+
+            if round%1000 == 0 {
+                log.Warningf("ZScan iterated roughly %d fields for key '%s'", round*batchSize, r.K)
+            }
+            cursorID = newCursorID
+        }
+        return nil
+    default:
+        return fmt.Errorf("migrate key of type '%s' not supported", r.T)
+    }
+}
+
 type Rows []*Row
 
 func (rs Rows) Keys() []string{
@@ -554,16 +703,18 @@ func (rs Rows) Types(client *redis.Client) (err error) {
     return nil
 }
 
-func (rs Rows) MGet(client *redis.Client, checkLargeObj bool) error {
+func (rs Rows) MGet(client *redis.Client, checkLargeObj bool, largeObjCard int64) error {
     if len(rs) == 0 {
         return nil
     }
+
     if rs[0].T == RedisTypeUnknown {
         if err := rs.Types(client); err != nil {
             return errors.Errorf("MGet::Types failed: %v", err)
         }
     }
-    if checkLargeObj {
+
+    if checkLargeObj && rs[0].Cardinality < 0 {
         if err := rs.MCard(client); err != nil {
             return errors.Errorf("MGet::MCard failed: %v", err)
         }
@@ -571,7 +722,7 @@ func (rs Rows) MGet(client *redis.Client, checkLargeObj bool) error {
 
     p := client.Pipeline()
     for _, row := range rs {
-        row.Get(p)
+        row.Get(p, largeObjCard)
     }
     cmders, cmdErr := p.Exec()
     if cmdErr != nil {
@@ -579,6 +730,7 @@ func (rs Rows) MGet(client *redis.Client, checkLargeObj bool) error {
     }
     for idx, cmder := range cmders {
         if _, ok := cmder.(*redis.StatusCmd); ok {
+            log.Warnf("Detected large object: %s(%d)", rs[idx].K, rs[idx].Cardinality)
             rs[idx].V = nil
             continue
         }
@@ -591,7 +743,7 @@ func (rs Rows) MGet(client *redis.Client, checkLargeObj bool) error {
     return nil
 }
 
-func (rs Rows) MDiff(client *redis.Client, rewriteCard bool) error {
+func (rs Rows) MDiff(client *redis.Client, replaceCard bool) error {
     if len(rs) == 0 {
         return nil
     }
@@ -614,23 +766,23 @@ func (rs Rows) MDiff(client *redis.Client, rewriteCard bool) error {
         if card > math.MaxInt32 {
             panic(fmt.Sprintf("card(%d) > math.MaxInt32", card))
         }
-        if int(card) != rs[idx].Cardinality {
+        if card != rs[idx].Cardinality {
             rs[idx].D = &CardDiff{
                 K:     rs[idx].K,
                 Mine:  rs[idx].Cardinality,
-                Other: int(card),
+                Other: card,
             }
-            if rewriteCard {
-                rs[idx].Cardinality = int(card)
+            if replaceCard {
+                rs[idx].Cardinality = card
             }
         }
     }
     return nil
 }
 
-func (rs Rows) MGetWithRetry(client *redis.Client, checkLargeObj bool, maxRetry int) error {
+func (rs Rows) MGetWithRetry(client *redis.Client, checkLargeObj bool, largeObjCard int64, maxRetry int) error {
     for i := 1; ; i++ {
-        if err := rs.MGet(client, checkLargeObj); err != nil {
+        if err := rs.MGet(client, checkLargeObj, largeObjCard); err != nil {
             if i >= maxRetry {
                 log.Errorf("MGet failed: '%v' after retried for %d times", err, maxRetry)
                 return err
@@ -656,6 +808,10 @@ func (rs Rows) MSet(target *redis.Client, pipelineCap int, logExistedKey bool) e
     p := NewPipeline(target, pipelineCap)
     for _, row := range rs {
         if row.OverwriteExistedKeys || row.TargetNotExists {
+            if row.OverwriteExistedKeys && row.DeleteTargetBeforeOverwrite {
+                p.Del(row.K)
+            }
+
             if row.V == nil {
                 log.Warnf("skip nil value of key %s, type: %v", row.K, row.T)
             } else if row.IsValueEmpty() {
@@ -742,7 +898,7 @@ func (rs Rows) MCard(target *redis.Client) error {
         if card > math.MaxInt32 {
             return errors.Errorf("card(%d) > math.MaxInt32", card)
         }
-        rs[idx].Cardinality = int(card)
+        rs[idx].Cardinality = card
     }
     return nil
 }
@@ -758,14 +914,15 @@ func (rs Rows) Stats() (successCount, errCount int64) {
     return successCount, errCount
 }
 
-func (rs Rows) Filter(filter func(*Row)bool) Rows {
-    ret := make(Rows, 0, len(rs))
+func (rs Rows) Filter(filter func(*Row)bool) (filtered, nonFiltered Rows) {
     for _, r := range rs {
         if filter(r) {
-            ret = append(ret, r)
+            filtered = append(filtered, r)
+        } else {
+            nonFiltered = append(nonFiltered, r)
         }
     }
-    return ret
+    return
 }
 
 func parseErr(cmders []redis.Cmder, err error) (resultErr error) {
@@ -809,9 +966,6 @@ func DiffAsync(input <-chan Rows, readerCount, writerCount int,
     var (
         readerWg sync.WaitGroup
         rowsRead  = make(chan Rows, maxBuffered)
-        isRetryableErr = func(err error) bool {
-            return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
-        }
     )
 
     for i := 0; i < readerCount; i++ {
@@ -821,9 +975,12 @@ func DiffAsync(input <-chan Rows, readerCount, writerCount int,
             defer readerWg.Done()
 
             for rows := range input {
-                if err := utils.ExecWithRetry(func() error {
+                if err := utils.ExecWithRetryRedis(func() error {
+                    if err := rows.Types(srcClient); err != nil {
+                        return errors.Errorf("Rows::MCard: can't get types: '%v'", err)
+                    }
                     return rows.MCard(targetClient)
-                }, maxRetry, retryInterval, isRetryableErr); err != nil {
+                }, maxRetry, retryInterval); err != nil {
                     atomic.AddInt64(failedReadBatches, 1)
                     log.Errorf("[DiffAsync][Manual] MCard failed: %v, keys: %v", err, rows.Keys())
                 } else {
@@ -851,15 +1008,15 @@ func DiffAsync(input <-chan Rows, readerCount, writerCount int,
             defer writerWg.Done()
 
             for rows := range rowsRead {
-                if err := utils.ExecWithRetry(func() error {
+                if err := utils.ExecWithRetryRedis(func() error {
                     return rows.MDiff(srcClient, true)
-                }, maxRetry, retryInterval, isRetryableErr); err != nil {
+                }, maxRetry, retryInterval); err != nil {
                     atomic.AddInt64(failedWriteBatches, 1)
                     log.Errorf("[DiffAsync][Manual] MDiff failed: '%v' keys: %v", err, rows.Keys())
                 } else {
                     tmp := atomic.AddInt64(successfulWriteBatches, 1)
                     log.Infof("[DiffAsync] MDiff %d batches successfully", tmp)
-                    if rows = rows.Filter(func(row *Row) bool {
+                    if rows, _ = rows.Filter(func(row *Row) bool {
                         return row.D != nil
                     }); len(rows) > 0 {
                         atomic.AddInt64(diffBatches, 1)

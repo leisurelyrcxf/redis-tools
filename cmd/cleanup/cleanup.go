@@ -50,10 +50,6 @@ func main()  {
 
         successfulReadBatches,  failedReadBatches int64
         maxRetry = 10
-
-        isRetryableErr = func(err error) bool {
-            return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
-        }
         retryInterval = time.Second * 10
         readerCount = 30
     )

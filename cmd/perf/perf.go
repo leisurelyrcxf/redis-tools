@@ -5,6 +5,7 @@ import (
     "context"
     "flag"
     "io"
+    "math"
     "math/rand"
     "net"
     "os"
@@ -82,7 +83,7 @@ func main() {
                 }
 
                 start := time.Now()
-                _ = rows.MGet(cli, false)
+                _ = rows.MGet(cli, false, math.MaxInt64)
                 successCount, errCount := rows.Stats()
                 atomic.AddInt64(&totalSucessCount, successCount)
                 atomic.AddInt64(&totalUserSeconds, int64(time.Since(start)/time.Microsecond)*successCount)

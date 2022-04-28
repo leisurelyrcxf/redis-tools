@@ -2,9 +2,7 @@ package main
 
 import (
     "flag"
-    "io"
     "net"
-    "strings"
     "sync"
     "sync/atomic"
     "time"
@@ -48,10 +46,6 @@ func main()  {
 
         rawRowsCh                                  = make(chan cmd.Rows, *maxBuffered)
         successfulWriteBatches, failedWriteBatches int64
-
-        isRetryableErr = func(err error) bool {
-            return strings.Contains(err.Error(), "broken pipe") || err == io.EOF
-        }
     )
 
     for i := 0; i < *writerCount; i++ {
@@ -61,9 +55,9 @@ func main()  {
             defer writerWg.Done()
 
             for rows := range rawRowsCh {
-                if err := utils.ExecWithRetry(func() error {
+                if err := utils.ExecWithRetryRedis(func() error {
                     return rows.MDel(srcClient)
-                }, 10, time.Second, isRetryableErr); err != nil {
+                }, 10, time.Second); err != nil {
                     atomic.AddInt64(&failedWriteBatches, 1)
                     log.Fatalf("[Manual] Read failed: %v @round %d, keys: %v", err, i, rows.Keys())
                 } else {
