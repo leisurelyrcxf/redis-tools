@@ -16,10 +16,10 @@ import (
 
 const (
     maxRetry      = 10
-    retryInterval = time.Second*5
+    retryInterval = time.Second * 5
 )
 
-func main()  {
+func main() {
     c := common.Flags("recovery redis keys (only recover different keys)", true)
     notLogExistedKeys := flag.Bool("not-log-existed-keys", false, "not log existed keys")
     largeObjCard := flag.Int64("large-obj-card", 6000000, "large obj card")
@@ -28,7 +28,7 @@ func main()  {
 
     c.Parse()
     var (
-        input  = make(chan cmd.Rows, c.MaxBuffered)
+        input = make(chan cmd.Rows, c.MaxBuffered)
     )
     var scannedBatches, diffOKReadBatches, diffFailedReadBatches, diffOKWriteBatches, diffFailedWriteBatches, diffBatches int64
     cmd.ScanSlotsRawAsync(c.SrcClient, c.Slots, c.RedisType,
@@ -41,12 +41,12 @@ func main()  {
     migrateDone := migrateAsync(diffCh, c.ReaderCount, c.WriterCount, c.WriterCount,
         c.SrcClient, c.TargetClient, c.MaxBuffered, c.BatchSize, !*notLogExistedKeys, *largeObjCard,
         &migrateOKReadBatches, &migrateFailedReadBatches, &migrateOKWriteBatches, &migrateFailedWriteBatches)
-    <- migrateDone
+    <-migrateDone
 
     utils.Assert(scannedBatches == diffOKReadBatches+diffFailedReadBatches)
     utils.Assert(diffOKReadBatches == diffOKWriteBatches+diffFailedWriteBatches)
-    utils.Assert(diffBatches == migrateOKReadBatches + migrateFailedReadBatches)
-    utils.Assert(migrateOKReadBatches == migrateOKWriteBatches + migrateFailedWriteBatches)
+    utils.Assert(diffBatches == migrateOKReadBatches+migrateFailedReadBatches)
+    utils.Assert(migrateOKReadBatches == migrateOKWriteBatches+migrateFailedWriteBatches)
     if diffFailedReadBatches == 0 && diffFailedWriteBatches == 0 && migrateFailedReadBatches == 0 && migrateFailedWriteBatches == 0 {
         if diffBatches == 0 {
             log.Warningf("source and dest are the same")
@@ -126,7 +126,7 @@ func migrateAsync(input <-chan cmd.Rows, readerCount, smallKeyWriterCount, large
 
             for rows := range smallKeyRows {
                 if err := utils.ExecWithRetryRedis(func() error {
-                    return rows.MSet(targetClient, batchSize, logExistedKeys)
+                    return rows.MSet(targetClient, batchSize, logExistedKeys, false)
                 }, maxRetry, retryInterval); err != nil {
                     atomic.AddInt64(failedWriteBatches, 1)
                     log.Errorf("[migrateAsync][Manual] Write failed: '%v', keys: %v", err, rows.Keys())
@@ -153,7 +153,6 @@ func migrateAsync(input <-chan cmd.Rows, readerCount, smallKeyWriterCount, large
             }
         }()
     }
-
 
     go func() {
         smallKeyWriterWg.Wait()

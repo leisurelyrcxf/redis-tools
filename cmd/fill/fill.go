@@ -25,9 +25,9 @@ import (
 )
 
 const (
-	defaultValueSize         = 2
-	defaultOverheadSize      = 20
-	defaultPipelineSize      = 100
+	defaultValueSize    = 2
+	defaultOverheadSize = 20
+	defaultPipelineSize = 100
 )
 
 type Task struct {
@@ -38,6 +38,7 @@ type Task struct {
 	valueSize       int
 	value           string
 	memtier         bool
+	useTxPipeline   bool
 
 	maxSlotNum int
 	slots      []int
@@ -49,14 +50,15 @@ func (t *Task) String() string {
 	return fmt.Sprintf("Task{%d-%d, value-size:%d, memtier:%v", t.lowKey, t.highKey, t.valueSize, t.memtier)
 }
 
-func NewTask(redisType cmd.RedisType, lowKey, highKey int64, valueSize int, memtier bool) *Task {
+func NewTask(redisType cmd.RedisType, lowKey, highKey int64, valueSize int, memtier bool, useTxPipeline bool) *Task {
 	task := (&Task{
-		RedisType: redisType,
-		lowKey:    lowKey,
-		highKey:   highKey,
-		valueSize: valueSize,
-		memtier:   memtier,
-		errCount:  *atomic.NewInt64(-1),
+		RedisType:     redisType,
+		lowKey:        lowKey,
+		highKey:       highKey,
+		valueSize:     valueSize,
+		memtier:       memtier,
+		useTxPipeline: useTxPipeline,
+		errCount:      *atomic.NewInt64(-1),
 	}).GenValue()
 	for key := task.lowKey; key < task.highKey; key++ {
 		strKey := genKey(key, task.memtier)
@@ -175,7 +177,7 @@ func (t *Task) Verify(ctx context.Context, cli *redis.Client) {
 
 func (t *Task) Write(ctx context.Context, cli *redis.Client) {
 	if err := utils.ExecWithRetryRedis(func() error {
-		return t.Rows.MSet(cli, len(t.Rows), true)
+		return t.Rows.MSet(cli, len(t.Rows), true, t.useTxPipeline)
 	}, common.DefaultMaxRetry, common.DefaultRetryInterval); err != nil {
 		log.Errorf("MSet failed: '%v'", err)
 		t.Finish(len(t.Rows))
@@ -251,7 +253,7 @@ func fillRedis(
 	lowKey, highKey int64,
 	taskSize int,
 	valueSize int, maxDBSize int64, memtier bool,
-	stopWhenFailed bool) int {
+	stopWhenFailed, useTxPipeline bool) int {
 	var (
 		taskCh       = make(chan *Task, 64)
 		taskFinishCh = make(chan *Task, 64)
@@ -307,7 +309,7 @@ func fillRedis(
 
 	LoopTasks:
 		for curKey := lowKey; curKey <= highKey && currentDBSize < maxDBSize; curKey += int64(taskSize) {
-			task := NewTask(redisType, curKey, minInt64(curKey+int64(taskSize), highKey), valueSize, memtier)
+			task := NewTask(redisType, curKey, minInt64(curKey+int64(taskSize), highKey), valueSize, memtier, useTxPipeline)
 			for {
 				select {
 				case taskCh <- task:
@@ -424,6 +426,7 @@ func main() {
 
 	doVerify := flag.Bool("verify", false, "verify data")
 	maxSlotNum := flag.Int("max-slot-num", 0, "max slot num")
+	useTxPipeline := flag.Bool("tx", false, "use tx pipeline")
 	var myFlags IntsFlag
 	flag.Var(&myFlags, "slots", "slots for this server, can be set multiple times")
 
@@ -469,7 +472,7 @@ func main() {
 		return
 	}
 	errCount := fillRedis(ctx, *dbId, fmt.Sprintf("%s:%d", *host, *port), *password, *threadNum, cmd.MustParseRedisType(*dataType),
-		*startKey, *maxKey, *pipelineSize, *valueSize, dbSize, memtier, !*dontStopWhenFailed)
+		*startKey, *maxKey, *pipelineSize, *valueSize, dbSize, memtier, !*dontStopWhenFailed, *useTxPipeline)
 	glog.Flush()
 	fmt.Printf("\nError Count in total: %d\n", errCount)
 }
