@@ -435,7 +435,7 @@ func (r *Row) CalcDiff(val interface{}) Diff {
 func (r *Row) Set(p *Pipeline) error {
 	switch r.T {
 	case RedisTypeString:
-		p.SetNX(r.K, r.V, DefaultExpire)
+		p.Set(r.K, r.V, DefaultExpire)
 		return nil
 	case RedisTypeList:
 		p.Del(r.K)
@@ -806,7 +806,7 @@ func (rs Rows) MSet(target *redis.Client, pipelineCap int, logExistedKey, useTxP
 
 	p := NewPipeline(target, pipelineCap, useTxPipeline)
 	for _, row := range rs {
-		if row.OverwriteExistedKeys || row.TargetNotExists {
+		if row.TargetNotExists || row.OverwriteExistedKeys {
 			if row.OverwriteExistedKeys && row.DeleteTargetBeforeOverwrite {
 				p.Del(row.K)
 			}

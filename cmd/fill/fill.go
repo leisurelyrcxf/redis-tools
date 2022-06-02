@@ -67,7 +67,6 @@ func NewTask(redisType cmd.RedisType, lowKey, highKey int64, valueSize int, memt
 			T:                    task.RedisType,
 			OverwriteExistedKeys: true,
 			V:                    task.getValue(strKey),
-			TargetNotExists:      true,
 		})
 	}
 	return task
@@ -175,7 +174,7 @@ func (t *Task) Verify(ctx context.Context, cli *redis.Client) {
 	t.Finish(errCount)
 }
 
-func (t *Task) Write(ctx context.Context, cli *redis.Client) {
+func (t *Task) Write(_ context.Context, cli *redis.Client) {
 	if err := utils.ExecWithRetryRedis(func() error {
 		return t.Rows.MSet(cli, len(t.Rows), true, t.useTxPipeline)
 	}, common.DefaultMaxRetry, common.DefaultRetryInterval); err != nil {
